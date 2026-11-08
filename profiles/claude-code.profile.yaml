@@ -1,0 +1,62 @@
+id: claude-code
+resource_version: 2
+display_name: Claude Code
+description: Claude Code CLI
+category: agent
+credentials:
+  - name: token
+    description: Claude Code OAuth or API token
+    env_vars:
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - ANTHROPIC_API_KEY
+      - CLAUDE_API_KEY
+    required: false
+    auth_style: header
+    header_name: Authorization
+    query_param: ""
+    stable_placeholder: true
+discovery:
+  credentials:
+    - token
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: statsig.anthropic.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: statsigapi.net
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: sentry.io
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: http-intake.logs.us5.datadoghq.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+binaries:
+  - /usr/bin/claude
+  - /usr/local/bin/claude
+  - /usr/bin/node
+  - /usr/local/bin/node
+  - /usr/lib/node_modules/@anthropic-ai/**
+  - /usr/local/lib/node_modules/@anthropic-ai/**
+  - /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+inference_capable: true
+source: user
+scope: platform

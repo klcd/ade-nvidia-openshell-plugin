@@ -1,0 +1,36 @@
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /bin
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /etc
+    - /var/log
+  read_write:
+    - /tmp
+    - /dev/null
+landlock:
+  compatibility: best_effort
+network_policies:
+  global_package_registries:
+    name: global_package_registries
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+network_middlewares:
+  outbound_token_redaction:
+    name: Redact provider-shaped API tokens in request bodies
+    middleware: openshell/regex
+    order: 10
+    config:
+      mode: redact
+    on_error: fail_closed
+    endpoints:
+      include:
+        - '**'

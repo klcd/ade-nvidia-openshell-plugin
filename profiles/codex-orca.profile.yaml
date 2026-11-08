@@ -1,0 +1,86 @@
+id: codex-orca
+resource_version: 1
+display_name: Codex for Orca
+description: OpenAI Codex CLI with gateway-owned OAuth refresh
+category: agent
+credentials:
+  - name: access_token
+    description: Codex OAuth access token
+    env_vars:
+      - CODEX_AUTH_ACCESS_TOKEN
+    required: false
+    stable_placeholder: true
+    auth_style: ""
+    header_name: ""
+    query_param: ""
+    refresh:
+      strategy: oauth2_refresh_token
+      token_url: https://auth.openai.com/oauth/token
+      refresh_before_seconds: 300
+      max_lifetime_seconds: 3600
+      material:
+        - name: client_id
+          description: Codex OAuth client ID
+          required: true
+        - name: refresh_token
+          description: Codex OAuth refresh token
+          required: true
+          secret: true
+  - name: account_id
+    description: Codex account identifier
+    env_vars:
+      - CODEX_AUTH_ACCOUNT_ID
+    required: false
+    stable_placeholder: true
+    auth_style: ""
+    header_name: ""
+    query_param: ""
+  - name: api_key
+    description: OpenAI API key, when Codex is configured for API key authentication
+    env_vars:
+      - OPENAI_API_KEY
+    required: false
+    stable_placeholder: true
+    auth_style: bearer
+    header_name: Authorization
+    query_param: ""
+endpoints:
+  - host: api.openai.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: auth.openai.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: chatgpt.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: ab.chatgpt.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+binaries:
+  - /usr/bin/codex
+  - /usr/local/bin/codex
+  - /usr/bin/node
+  - /usr/local/bin/node
+  - /usr/lib/node_modules/@openai/**
+  - /usr/local/lib/node_modules/@openai/**
+inference_capable: true
+discovery:
+  credentials:
+    - access_token
+    - account_id
+    - api_key
+source: user
+scope: platform

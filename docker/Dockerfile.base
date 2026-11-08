@@ -1,0 +1,55 @@
+FROM node:20-bookworm
+
+# Install common development dependencies, build tools, python, and utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    make \
+    git \
+    curl \
+    ca-certificates \
+    procps \
+    ripgrep \
+    jq \
+    tar \
+    gzip \
+    unzip \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go compiler
+ARG GO_VERSION=1.26.2
+RUN set -ex; \
+    ARCH=$(dpkg --print-architecture); \
+    case "$ARCH" in \
+      arm64) GO_ARCH="arm64" ;; \
+      amd64) GO_ARCH="amd64" ;; \
+      *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac; \
+    curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -xz -C /usr/local; \
+    /usr/local/go/bin/go version
+
+ENV PATH="/usr/local/go/bin:/home/ubuntu/go/bin:${PATH}"
+ENV GOPATH="/home/ubuntu/go"
+
+# Create sandbox user ubuntu with standard sandbox symlinks
+RUN useradd -m -s /bin/bash ubuntu || true && \
+    mkdir -p /sandbox /home/ubuntu/go && \
+    ln -sfn /sandbox/.claude /home/ubuntu/.claude && \
+    ln -sfn /sandbox/.claude.json /home/ubuntu/.claude.json && \
+    ln -sfn /sandbox/.gemini /home/ubuntu/.gemini && \
+    ln -sfn /sandbox/.codex /home/ubuntu/.codex && \
+    ln -sfn /sandbox/.gitconfig /home/ubuntu/.gitconfig && \
+    chown -h ubuntu:ubuntu \
+      /home/ubuntu/.claude \
+      /home/ubuntu/.claude.json \
+      /home/ubuntu/.gemini \
+      /home/ubuntu/.codex \
+      /home/ubuntu/.gitconfig && \
+    chown -R ubuntu:ubuntu /sandbox /home/ubuntu/go
+
+WORKDIR /sandbox
+USER ubuntu
+
+CMD ["bash"]

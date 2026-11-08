@@ -1,0 +1,47 @@
+version: 1
+network_policies:
+  antigravity_endpoints:
+    name: antigravity_endpoints
+    endpoints:
+      - host: daily-cloudcode-pa.googleapis.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: cloudcode-pa.googleapis.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: www.googleapis.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: oauth2.googleapis.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: accounts.google.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: storage.googleapis.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: lh3.googleusercontent.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true

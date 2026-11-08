@@ -1,0 +1,19 @@
+FROM openshell-base:latest
+
+USER root
+# Install Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code && \
+    npm cache clean --force
+
+# Install combine-skills utility and wrap claude binary to combine skills prior to execution
+COPY combine-skills.sh /usr/local/bin/combine-skills
+RUN chmod +x /usr/local/bin/combine-skills && \
+    if [ -f /usr/local/bin/claude ]; then \
+      mv /usr/local/bin/claude /usr/local/bin/claude-real; \
+    fi && \
+    printf '#!/usr/bin/env bash\n/usr/local/bin/combine-skills\nexec /usr/local/bin/claude-real "$@"\n' > /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude
+
+USER ubuntu
+WORKDIR /sandbox
+CMD ["bash"]

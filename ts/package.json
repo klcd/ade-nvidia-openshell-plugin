@@ -1,0 +1,35 @@
+{
+  "name": "@orca/openshell-bridge",
+  "version": "1.0.0",
+  "description": "High-performance TypeScript bridge between Orca Chat, agent CLIs, and NVIDIA OpenShell Landlock sandboxes",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "agent-box": "dist/cli.js",
+    "claude-box": "dist/cli.js",
+    "codex-box": "dist/cli.js",
+    "agy-box": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "bundle": "bun build src/cli.ts --outfile=dist/agent-box.bundle.js --target=node",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "keywords": [
+    "orca",
+    "openshell",
+    "sandbox",
+    "landlock",
+    "codex",
+    "claude-code",
+    "antigravity"
+  ],
+  "author": "Google DeepMind / Cedric",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

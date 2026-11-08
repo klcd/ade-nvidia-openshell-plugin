@@ -1,0 +1,89 @@
+id: antigravity
+resource_version: 3
+display_name: Antigravity
+description: Google Antigravity CLI
+category: agent
+credentials:
+  - name: token
+    description: Google OAuth Access Token
+    env_vars:
+      - GOOGLE_OAUTH_ACCESS_TOKEN
+    required: false
+    auth_style: ""
+    header_name: ""
+    query_param: ""
+    stable_placeholder: true
+  - name: refresh_token
+    description: Google OAuth refresh token
+    env_vars:
+      - GOOGLE_OAUTH_REFRESH_TOKEN
+    required: false
+    auth_style: ""
+    header_name: ""
+    query_param: ""
+    stable_placeholder: true
+  - name: id_token
+    description: Google OAuth ID token
+    env_vars:
+      - GOOGLE_OAUTH_ID_TOKEN
+    required: false
+    auth_style: ""
+    header_name: ""
+    query_param: ""
+    stable_placeholder: true
+discovery:
+  credentials:
+    - token
+    - refresh_token
+    - id_token
+endpoints:
+  - host: daily-cloudcode-pa.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: cloudcode-pa.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: www.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: oauth2.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: accounts.google.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: storage.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+  - host: lh3.googleusercontent.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+    request_body_credential_rewrite: true
+binaries:
+  - /usr/bin/agy
+  - /usr/local/bin/agy
+  - /usr/bin/antigravity
+  - /usr/local/bin/antigravity
+inference_capable: true
+source: user
+scope: workspace

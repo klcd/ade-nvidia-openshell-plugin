@@ -1,0 +1,23 @@
+FROM openshell-base:latest
+
+USER root
+# Download and install Google Antigravity CLI for Linux
+RUN set -ex; \
+    ARCH=$(dpkg --print-architecture); \
+    case "$ARCH" in \
+      arm64) GCS_ARCH="linux-arm/cli_linux_arm64.tar.gz" ;; \
+      amd64) GCS_ARCH="linux-amd64/cli_linux_amd64.tar.gz" ;; \
+      *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac; \
+    URL="https://storage.googleapis.com/antigravity-public/antigravity-cli/1.3.5-6164039479459840/${GCS_ARCH}"; \
+    echo "Downloading Antigravity CLI from ${URL}..."; \
+    mkdir -p /tmp/agy && \
+    curl -fsSL "${URL}" | tar -xz -C /tmp/agy && \
+    mv /tmp/agy/antigravity /usr/local/bin/agy && \
+    chmod 755 /usr/local/bin/agy && \
+    ln -sf /usr/local/bin/agy /usr/local/bin/antigravity && \
+    rm -rf /tmp/agy
+
+USER ubuntu
+WORKDIR /sandbox
+CMD ["bash"]

@@ -1,0 +1,35 @@
+version: 1
+network_policies:
+  claude_endpoints:
+    name: claude_endpoints
+    endpoints:
+      - host: api.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: statsig.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: statsigapi.net
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: sentry.io
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true
+      - host: http-intake.logs.us5.datadoghq.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+        request_body_credential_rewrite: true

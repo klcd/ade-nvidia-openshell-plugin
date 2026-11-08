@@ -1,0 +1,10 @@
+FROM openshell-base:latest
+
+USER root
+# Install OpenAI Codex CLI
+RUN npm install -g @openai/codex && \
+    npm cache clean --force
+
+USER ubuntu
+WORKDIR /sandbox
+CMD ["bash"]
