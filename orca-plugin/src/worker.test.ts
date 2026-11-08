@@ -116,9 +116,13 @@ test('parses permission policies coupled to CLI commands and evaluates command c
     assert.equal(group.denyCount, 2)
     assert.equal(group.rules[1].cliCommand, 'git status [args...]')
 
-    const report = buildPolicyReport({ workspacePath: wsDir, homeDir })
+    const report = buildPolicyReport({ workspacePath: wsDir, agent: 'codex', homeDir })
     assert.equal(report.permissionGroups.length, 2)
-    assert.equal(report.agents.length, 3)
+    assert.equal(report.workspaces.length, 1)
+    assert.equal(report.selectedWorkspace.path, wsDir)
+    assert.equal(report.currentAgent, 'codex')
+    assert.equal(report.agents.length, 1)
+    assert.equal(report.agents[0].agent, 'codex')
 
     const allowEval = evaluateCommandPolicy('git status -s', report)
     assert.equal(allowEval.verdict, 'allow')

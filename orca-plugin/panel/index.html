@@ -260,16 +260,25 @@
           <span>OpenShell Policy &amp; CLI Inspector</span>
           <span id="sandboxBadge" class="badge neutral">Loading...</span>
         </div>
-        <button id="refreshBtn" title="Reload policies and active sandboxes">Refresh</button>
+        <button id="refreshBtn" title="Reload active project &amp; agent policies">Refresh</button>
       </div>
-      <div class="controls">
-        <select id="workspaceSelect" title="Select Workspace"></select>
-        <select id="agentFilter" title="Filter by Agent">
-          <option value="all">All Agents (claude, codex, agy)</option>
-          <option value="claude">Claude Code (claude-box)</option>
-          <option value="codex">OpenAI Codex (codex-box)</option>
-          <option value="antigravity">Google Antigravity (agy-box)</option>
-        </select>
+      <div id="contextBanner" class="grid-2" style="margin-top:2px;">
+        <div class="stat-box">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span class="sub">Current Project</span>
+            <span id="branchBadge" class="badge neutral">—</span>
+          </div>
+          <strong id="projectLabel" class="mono" style="font-size:12px;">Detecting...</strong>
+          <span id="projectPathLabel" class="sub mono" style="font-size:10px;word-break:break-all;"></span>
+        </div>
+        <div class="stat-box">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span class="sub">Running Agent</span>
+            <span id="agentStateBadge" class="badge allow">Active</span>
+          </div>
+          <strong id="agentLabel" class="mono" style="font-size:12px;">Detecting...</strong>
+          <span id="agentSessionLabel" class="sub" style="font-size:10px;"></span>
+        </div>
       </div>
     </div>
 
@@ -287,7 +296,7 @@
         <button class="copy-btn sample-cmd" data-cmd="git status -s">git status -s</button>
         <button class="copy-btn sample-cmd" data-cmd="docker ps --format '{{.Names}}'">docker ps</button>
         <button class="copy-btn sample-cmd" data-cmd="kubectl get pods -A">kubectl get pods</button>
-        <button class="copy-btn sample-cmd" data-cmd="orca orchestration worker-start --agent claude --spec 'Run tests' --worktree current --json">orca worker-start</button>
+        <button class="copy-btn sample-cmd" id="sampleWorkerCmd" data-cmd="orca orchestration worker-start --agent claude --spec 'Run tests' --worktree current --json">orca worker-start</button>
         <button class="copy-btn sample-cmd" data-cmd="sudo rm -rf /">sudo rm -rf /</button>
       </div>
       <div id="evalOutput" style="display:none;" class="eval-result"></div>
@@ -295,7 +304,7 @@
 
     <div class="tabs">
       <button class="tab active" data-tab="cli">CLI Commands (<span id="cliCount">0</span>)</button>
-      <button class="tab" data-tab="sandbox">Agent Sandboxes &amp; Egress</button>
+      <button class="tab" data-tab="sandbox">Agent Sandbox &amp; Egress</button>
       <button class="tab" data-tab="delegation">Orchestration CLI</button>
     </div>
 
@@ -327,14 +336,21 @@
       } catch {}
     }
 
-    async function loadReport(workspacePath) {
+    async function loadReport() {
       try {
-        const res = await window.orca.plugin.request('getPolicyReport', workspacePath ? { workspacePath } : {});
+        const res = await window.orca.plugin.request('getPolicyReport', {});
+        const changedContext =
+          !currentReport ||
+          currentReport.selectedWorkspace.path !== res.selectedWorkspace.path ||
+          currentReport.currentAgent !== res.currentAgent ||
+          currentReport.activeSandboxes.length !== res.activeSandboxes.length;
         currentReport = res;
         renderHeader();
-        renderActiveTab();
+        if (changedContext || !document.getElementById('ruleSearch')) {
+          renderActiveTab();
+        }
         const cmd = document.getElementById('cmdInput').value.trim();
-        if (cmd) await runCommandCheck(cmd);
+        if (cmd && changedContext) await runCommandCheck(cmd);
       } catch (err) {
         document.getElementById('tabContent').innerHTML =
           `<div class="card"><span class="badge deny">Error</span><div class="mono">${escapeHtml(err?.message || err)}</div></div>`;
@@ -350,14 +366,34 @@
         ? `${sbCount} Active Sandbox${sbCount === 1 ? '' : 'es'}`
         : 'Landlock Enforced';
 
-      const wsSelect = document.getElementById('workspaceSelect');
-      wsSelect.innerHTML = currentReport.workspaces.map(w => {
-        const selected = w.path === currentReport.selectedWorkspace.path ? 'selected' : '';
-        const branch = w.branch ? ` (${w.branch})` : '';
-        return `<option value="${escapeHtml(w.path)}" ${selected}>${escapeHtml(w.name)}${escapeHtml(branch)}</option>`;
-      }).join('');
+      const ws = currentReport.selectedWorkspace;
+      document.getElementById('projectLabel').textContent = ws.name;
+      document.getElementById('projectPathLabel').textContent = ws.path;
+      const branchBadge = document.getElementById('branchBadge');
+      branchBadge.textContent = ws.branch || 'main';
 
-      document.getElementById('cliCount').textContent = String(currentReport.allCliRules.length);
+      const agentObj = currentReport.agents[0];
+      const activeSession = (currentReport.activeAgentSessions || [])[0];
+      const agentDisplay = agentObj ? `${agentObj.displayName} (${agentObj.agent})` : currentReport.currentAgent;
+      document.getElementById('agentLabel').textContent = agentDisplay;
+
+      const stateBadge = document.getElementById('agentStateBadge');
+      const sessionState = activeSession ? activeSession.state : (sbCount > 0 ? 'sandboxed' : 'ready');
+      stateBadge.textContent = sessionState.toUpperCase();
+      stateBadge.className = 'badge ' + (sessionState === 'working' || sessionState === 'running' || sbCount > 0 ? 'allow' : 'neutral');
+
+      const sessionLabel = document.getElementById('agentSessionLabel');
+      sessionLabel.textContent = activeSession?.conversationName
+        ? activeSession.conversationName
+        : (agentObj ? `Wrapper: ${agentObj.agent === 'antigravity' ? 'agy-box' : agentObj.agent + '-box'}` : '');
+
+      const workerBtn = document.getElementById('sampleWorkerCmd');
+      if (workerBtn) {
+        workerBtn.dataset.cmd = `orca orchestration worker-start --agent ${currentReport.currentAgent} --spec 'Run tests' --worktree current --json`;
+      }
+
+      const agentRules = currentReport.allCliRules.filter(r => r.compatibleAgents.includes(currentReport.currentAgent));
+      document.getElementById('cliCount').textContent = String(agentRules.length);
     }
 
     async function runCommandCheck(command) {
@@ -367,6 +403,7 @@
         const res = await window.orca.plugin.request('evaluateCommand', {
           command,
           workspacePath: currentReport.selectedWorkspace.path,
+          agent: currentReport.currentAgent,
         });
         box.style.display = 'flex';
         const badgeLabel = res.verdict.toUpperCase();
@@ -391,13 +428,48 @@
       }
     }
 
-    function renderCliTab() {
+    function renderNativeSyncCard() {
       const ns = currentReport.nativeSync;
-      const selectedAgent = document.getElementById('agentFilter').value;
+      const agent = currentReport.currentAgent;
+      if (agent === 'claude') {
+        return `
+          <div class="stat-box">
+            <div style="display:flex;justify-content:space-between;">
+              <strong>Claude Native Config (<code class="mono">.claude/settings.json</code>)</strong>
+              <span class="badge ${ns.claudeSynced ? 'allow' : 'neutral'}">${ns.claudeSynced ? 'Synced' : 'Default'}</span>
+            </div>
+            <span class="sub">${ns.claudeAllowCount} allow / ${ns.claudeDenyCount} deny rules in ${escapeHtml(currentReport.selectedWorkspace.name)}</span>
+          </div>
+        `;
+      }
+      if (agent === 'codex') {
+        return `
+          <div class="stat-box">
+            <div style="display:flex;justify-content:space-between;">
+              <strong>Codex Native Config (<code class="mono">.codex/rules/default.rules</code>)</strong>
+              <span class="badge ${ns.codexSynced ? 'allow' : 'neutral'}">${ns.codexSynced ? 'Synced' : 'Default'}</span>
+            </div>
+            <span class="sub">${ns.codexRuleCount} execpolicy prefix_rules in ${escapeHtml(currentReport.selectedWorkspace.name)}</span>
+          </div>
+        `;
+      }
+      return `
+        <div class="stat-box">
+          <div style="display:flex;justify-content:space-between;">
+            <strong>Antigravity Native Config (<code class="mono">.gemini/settings.json</code>)</strong>
+            <span class="badge ${ns.geminiSynced ? 'allow' : 'neutral'}">${ns.geminiSynced ? 'Synced' : 'Default'}</span>
+          </div>
+          <span class="sub">${ns.geminiAllowCount} allow / ${ns.geminiDenyCount} exclude rules in ${escapeHtml(currentReport.selectedWorkspace.name)}</span>
+        </div>
+      `;
+    }
+
+    function renderCliTab() {
+      const selectedAgent = currentReport.currentAgent;
 
       const groupsHtml = currentReport.permissionGroups.map(group => {
         const filteredRules = group.rules.filter(r => {
-          if (selectedAgent !== 'all' && !r.compatibleAgents.includes(selectedAgent)) return false;
+          if (!r.compatibleAgents.includes(selectedAgent)) return false;
           if (actionFilter !== 'all' && r.action !== actionFilter) return false;
           if (!searchFilter) return true;
           const q = searchFilter.toLowerCase();
@@ -414,7 +486,6 @@
               <div class="cmd-meta">
                 <span>Rule: <code class="mono">${escapeHtml(r.raw)}</code></span>
                 <span>• Binary: <code class="mono">${escapeHtml(r.baseBinary)}</code></span>
-                <span>• Agents: ${escapeHtml(r.compatibleAgents.join(', '))}</span>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;">
@@ -442,33 +513,7 @@
 
       return `
         <div class="card">
-          <div class="card-title">
-            <span>Workspace Native Agent Config Sync</span>
-            <span class="sub">${escapeHtml(currentReport.selectedWorkspace.name)}</span>
-          </div>
-          <div class="grid-2">
-            <div class="stat-box">
-              <div style="display:flex;justify-content:space-between;">
-                <strong>Claude (.claude/settings.json)</strong>
-                <span class="badge ${ns.claudeSynced ? 'allow' : 'neutral'}">${ns.claudeSynced ? 'Synced' : 'Default'}</span>
-              </div>
-              <span class="sub">${ns.claudeAllowCount} allow / ${ns.claudeDenyCount} deny rules</span>
-            </div>
-            <div class="stat-box">
-              <div style="display:flex;justify-content:space-between;">
-                <strong>Codex (.codex/rules)</strong>
-                <span class="badge ${ns.codexSynced ? 'allow' : 'neutral'}">${ns.codexSynced ? 'Synced' : 'Default'}</span>
-              </div>
-              <span class="sub">${ns.codexRuleCount} execpolicy prefix_rules</span>
-            </div>
-            <div class="stat-box">
-              <div style="display:flex;justify-content:space-between;">
-                <strong>Antigravity (.gemini/settings.json)</strong>
-                <span class="badge ${ns.geminiSynced ? 'allow' : 'neutral'}">${ns.geminiSynced ? 'Synced' : 'Default'}</span>
-              </div>
-              <span class="sub">${ns.geminiAllowCount} allow / ${ns.geminiDenyCount} exclude rules</span>
-            </div>
-          </div>
+          ${renderNativeSyncCard()}
           <div class="controls" style="margin-top:4px;">
             <input id="ruleSearch" type="text" placeholder="Filter CLI commands (e.g. git, docker, kubectl, sudo, rm)..." value="${escapeHtml(searchFilter)}" />
             <select id="actionSelect" style="max-width:130px;">
@@ -483,12 +528,11 @@
     }
 
     function renderSandboxTab() {
-      const selectedAgent = document.getElementById('agentFilter').value;
-      const agents = currentReport.agents.filter(a => selectedAgent === 'all' || a.agent === selectedAgent);
+      const agents = currentReport.agents;
 
       const activeHtml = currentReport.activeSandboxes.length > 0
         ? `<div class="card">
-            <div class="card-title"><span>Running OpenShell Sandboxes</span><span class="badge allow">${currentReport.activeSandboxes.length} Ready</span></div>
+            <div class="card-title"><span>Running OpenShell Sandboxes (${escapeHtml(currentReport.currentAgent)})</span><span class="badge allow">${currentReport.activeSandboxes.length} Ready</span></div>
             ${currentReport.activeSandboxes.map(sb => `
               <div class="cmd-row">
                 <div class="cmd-left">
@@ -529,7 +573,7 @@
             ${a.credentialPlaceholders.map(c => `<span class="chip" title="Supervisor placeholder env">${escapeHtml(c)}=openshell:resolve:...</span>`).join('')}
           </div>
 
-          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Landlock Filesystem Policy</div>
+          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Landlock Filesystem Policy (${escapeHtml(currentReport.selectedWorkspace.name)})</div>
           <div class="cmd-row">
             <div class="cmd-left">
               <div class="cmd-meta"><span class="badge allow">READ-WRITE</span> <span class="mono">${escapeHtml(a.filesystemReadWrite.join(', '))}</span></div>
@@ -568,12 +612,12 @@
               <span class="badge allow">Active Grant</span>
             </div>
           `).join('')
-        : '<div class="sub">No active terminal grants currently open.</div>';
+        : `<div class="sub">No active terminal grants currently open for ${escapeHtml(currentReport.selectedWorkspace.name)}.</div>`;
 
       return `
         <div class="card">
           <div class="card-title">
-            <span>In-Sandbox Worker Delegation Policy</span>
+            <span>In-Sandbox Worker Delegation Policy (${escapeHtml(currentReport.selectedWorkspace.name)})</span>
             <span class="badge ${d.autoGrantEnabled ? 'allow' : 'neutral'}">${d.autoGrantEnabled ? 'Auto-Grant Enabled' : 'Manual Grant'}</span>
           </div>
           <div class="sub">
@@ -654,14 +698,7 @@
     });
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
-      const ws = document.getElementById('workspaceSelect').value;
-      loadReport(ws);
-    });
-    document.getElementById('workspaceSelect').addEventListener('change', (e) => {
-      loadReport(e.target.value);
-    });
-    document.getElementById('agentFilter').addEventListener('change', () => {
-      renderActiveTab();
+      loadReport();
     });
     document.getElementById('testBtn').addEventListener('click', () => {
       runCommandCheck(document.getElementById('cmdInput').value);
@@ -669,6 +706,13 @@
     document.getElementById('cmdInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') runCommandCheck(e.target.value);
     });
+
+    window.addEventListener('focus', () => {
+      loadReport();
+    });
+    setInterval(() => {
+      if (!document.hidden) loadReport();
+    }, 5000);
 
     loadReport();
   </script>

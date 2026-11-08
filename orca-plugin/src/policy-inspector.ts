@@ -105,9 +105,19 @@ export interface WorkspaceEntry {
   branch: string | null
 }
 
+export interface ActiveAgentSessionInfo {
+  agent: 'claude' | 'codex' | 'antigravity'
+  state: string
+  conversationName: string | null
+  paneKey: string | null
+  updatedAt: number
+}
+
 export interface PolicyInspectionReport {
   generatedAt: string
   selectedWorkspace: WorkspaceEntry
+  currentAgent: 'claude' | 'codex' | 'antigravity'
+  activeAgentSessions: ActiveAgentSessionInfo[]
   workspaces: WorkspaceEntry[]
   activeSandboxes: ActiveSandboxInfo[]
   agents: AgentProfilePolicy[]
@@ -386,60 +396,161 @@ export function parseOpenShellPolicyFile(filePath: string): ParsedOpenShellPolic
   return result
 }
 
-export function discoverWorkspaces(preferredWorkspacePath?: string): WorkspaceEntry[] {
-  const seen = new Map<string, WorkspaceEntry>()
-  const addWs = (entry: WorkspaceEntry) => {
-    if (entry.path && !seen.has(entry.path) && fs.existsSync(entry.path)) {
-      seen.set(entry.path, entry)
-    }
-  }
+function normalizeAgentId(raw?: string | null): 'claude' | 'codex' | 'antigravity' | null {
+  if (!raw) return null
+  const lower = raw.toLowerCase().trim()
+  if (lower === 'claude' || lower === 'claude-code' || lower === 'claude-box') return 'claude'
+  if (lower === 'codex' || lower === 'codex-box') return 'codex'
+  if (lower === 'antigravity' || lower === 'agy' || lower === 'agy-box' || lower === 'gemini') return 'antigravity'
+  return null
+}
 
-  if (preferredWorkspacePath && fs.existsSync(preferredWorkspacePath)) {
-    addWs({
-      id: `local::${preferredWorkspacePath}`,
-      name: path.basename(preferredWorkspacePath),
-      path: preferredWorkspacePath,
-      branch: null,
-    })
-  }
+export interface CurrentOrcaContext {
+  workspace: WorkspaceEntry
+  currentAgent: 'claude' | 'codex' | 'antigravity'
+  activeAgentSessions: ActiveAgentSessionInfo[]
+}
 
-  try {
-    const out = execFileSync('orca', ['worktree', 'list', '--json'], {
-      encoding: 'utf8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    const parsed = JSON.parse(out) as {
-      result?: {
-        worktrees?: Array<{ id?: string; path?: string; branch?: string | null; repoName?: string }>
+/**
+ * Queries Orca for the currently active worktree (`orca worktree current --json` + `orca worktree ps --json`)
+ * and detects the currently running/active agent in that worktree.
+ */
+export function discoverCurrentOrcaContext(options?: {
+  workspacePath?: string
+  agent?: string
+}): CurrentOrcaContext {
+  let activeWorkspace: WorkspaceEntry | null = null
+  const activeAgentSessions: ActiveAgentSessionInfo[] = []
+  let detectedAgent: 'claude' | 'codex' | 'antigravity' | null = normalizeAgentId(options?.agent)
+
+  // If an explicit workspacePath is passed (e.g. unit tests), honour it directly without slow CLI calls if it's a temp dir
+  const isExplicitTestPath =
+    Boolean(options?.workspacePath) &&
+    (options!.workspacePath!.includes('openshell-policy-test-') || !fs.existsSync(path.join(options!.workspacePath!, '.git')))
+
+  if (!isExplicitTestPath) {
+    // 1. Check `orca worktree current --json` for the exact focused project in Orca UI
+    try {
+      const currentOut = execFileSync('orca', ['worktree', 'current', '--json'], {
+        encoding: 'utf8',
+        timeout: 2500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      const parsed = JSON.parse(currentOut) as {
+        result?: {
+          worktree?: {
+            id?: string
+            path?: string
+            displayName?: string
+            branch?: string | null
+          }
+        }
       }
-    }
-    for (const wt of parsed.result?.worktrees ?? []) {
-      if (wt.path) {
-        seen.set(wt.path, {
+      const wt = parsed.result?.worktree
+      if (wt?.path && (!options?.workspacePath || wt.path === options.workspacePath)) {
+        activeWorkspace = {
           id: wt.id || `local::${wt.path}`,
-          name: path.basename(wt.path),
+          name: wt.displayName || path.basename(wt.path),
           path: wt.path,
           branch: wt.branch ? wt.branch.replace(/^refs\/heads\//, '') : null,
-        })
+        }
       }
-    }
-  } catch {}
+    } catch {}
 
-  const fallbackDirs = [
-    path.join(os.homedir(), 'Projects', 'safe-orca-setup'),
-    path.join(os.homedir(), 'Projects', 'AgenticCoding', 'permission-setup'),
-  ]
-  for (const dir of fallbackDirs) {
-    addWs({
-      id: `local::${dir}`,
-      name: path.basename(dir),
-      path: dir,
-      branch: null,
-    })
+    // 2. Check `orca worktree ps --limit 15 --json` to find active agent sessions in the current worktree
+    try {
+      const psOut = execFileSync('orca', ['worktree', 'ps', '--limit', '15', '--json'], {
+        encoding: 'utf8',
+        timeout: 2500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      const parsed = JSON.parse(psOut) as {
+        result?: {
+          worktrees?: Array<{
+            worktreeId?: string
+            path?: string
+            repo?: string
+            displayName?: string
+            branch?: string | null
+            isActive?: boolean
+            agents?: Array<{
+              paneKey?: string | null
+              state?: string
+              agentType?: string
+              conversationName?: string | null
+              updatedAt?: number
+            }>
+          }>
+        }
+      }
+      const worktrees = parsed.result?.worktrees ?? []
+      const targetWt =
+        (options?.workspacePath ? worktrees.find(w => w.path === options.workspacePath) : undefined) ||
+        (activeWorkspace ? worktrees.find(w => w.path === activeWorkspace!.path) : undefined) ||
+        worktrees.find(w => w.isActive) ||
+        worktrees[0]
+
+      if (targetWt?.path) {
+        if (!activeWorkspace) {
+          activeWorkspace = {
+            id: targetWt.worktreeId || `local::${targetWt.path}`,
+            name: targetWt.repo || targetWt.displayName || path.basename(targetWt.path),
+            path: targetWt.path,
+            branch: targetWt.branch ? targetWt.branch.replace(/^refs\/heads\//, '') : null,
+          }
+        }
+        for (const ag of targetWt.agents ?? []) {
+          const norm = normalizeAgentId(ag.agentType)
+          if (norm) {
+            activeAgentSessions.push({
+              agent: norm,
+              state: ag.state || 'unknown',
+              conversationName: ag.conversationName || null,
+              paneKey: ag.paneKey || null,
+              updatedAt: Number(ag.updatedAt ?? 0),
+            })
+          }
+        }
+      }
+    } catch {}
   }
 
-  return [...seen.values()]
+  if (!activeWorkspace) {
+    const fallbackPath =
+      (options?.workspacePath && fs.existsSync(options.workspacePath) ? options.workspacePath : null) ||
+      process.cwd()
+    activeWorkspace = {
+      id: `local::${fallbackPath}`,
+      name: path.basename(fallbackPath),
+      path: fallbackPath,
+      branch: null,
+    }
+  }
+
+  // Sort active agent sessions: working/running first, then most recently updated
+  activeAgentSessions.sort((a, b) => {
+    const aWorking = a.state === 'working' || a.state === 'running' ? 1 : 0
+    const bWorking = b.state === 'working' || b.state === 'running' ? 1 : 0
+    if (aWorking !== bWorking) return bWorking - aWorking
+    return b.updatedAt - a.updatedAt
+  })
+
+  if (!detectedAgent && activeAgentSessions.length > 0) {
+    detectedAgent = activeAgentSessions[0].agent
+  }
+
+  // Also check running OpenShell sandboxes if no agent session was found via worktree ps
+  if (!detectedAgent) {
+    const sandboxes = listActiveSandboxes()
+    const sbAgent = sandboxes.map(s => normalizeAgentId(s.agent)).find(Boolean)
+    if (sbAgent) detectedAgent = sbAgent
+  }
+
+  return {
+    workspace: activeWorkspace,
+    currentAgent: detectedAgent || 'claude',
+    activeAgentSessions,
+  }
 }
 
 export function listActiveSandboxes(): ActiveSandboxInfo[] {
@@ -547,6 +658,7 @@ export function inspectNativeSync(workspacePath: string): NativeAgentSyncStatus 
 
 export function buildPolicyReport(options?: {
   workspacePath?: string
+  agent?: string
   homeDir?: string
   binDir?: string
   orcaPolicyDir?: string
@@ -558,15 +670,12 @@ export function buildPolicyReport(options?: {
     process.env.ORCA_OPENSHELL_POLICY_DIR ||
     path.join(homeDir, '.agents', 'orca-openshell-policies')
 
-  const workspaces = discoverWorkspaces(options?.workspacePath)
-  const selectedWorkspace =
-    workspaces.find(w => w.path === options?.workspacePath) ||
-    workspaces[0] || {
-      id: `local::${process.cwd()}`,
-      name: path.basename(process.cwd()),
-      path: process.cwd(),
-      branch: null,
-    }
+  const context = discoverCurrentOrcaContext({
+    workspacePath: options?.workspacePath,
+    agent: options?.agent,
+  })
+  const selectedWorkspace = context.workspace
+  const currentAgent = context.currentAgent
 
   const wsName = path.basename(selectedWorkspace.path)
   const globalDefaultPolicy = parseOpenShellPolicyFile(path.join(homeDir, '.agents', 'policies', 'default.yaml'))
@@ -654,7 +763,7 @@ export function buildPolicyReport(options?: {
     }
   }
 
-  const agents: AgentProfilePolicy[] = [
+  const allAgents: AgentProfilePolicy[] = [
     buildAgentPolicy(
       'claude',
       'Claude Code',
@@ -751,10 +860,13 @@ export function buildPolicyReport(options?: {
     ),
   ]
 
+  // Only show the currently running agent's profile policy
+  const agents = allAgents.filter(a => a.agent === currentAgent)
+
   const permissionGroups = loadPermissionGroups(selectedWorkspace.path, homeDir)
   const allCliRules = permissionGroups.flatMap(g => g.rules)
 
-  // Delegation configuration & active grants
+  // Delegation configuration & active grants for the current workspace
   const delegationConfigPath = path.join(selectedWorkspace.path, '.agents', 'delegation.json')
   let autoGrantEnabled = process.env.ORCA_AUTO_GRANT_DELEGATION === '1'
   let allowedAgents = ['claude', 'antigravity', 'codex']
@@ -777,9 +889,11 @@ export function buildPolicyReport(options?: {
       for (const file of fs.readdirSync(grantsDir)) {
         if (!file.endsWith('.json')) continue
         const data = JSON.parse(fs.readFileSync(path.join(grantsDir, file), 'utf8'))
+        const ws = String(data.workspaceId || '')
+        if (ws && !ws.includes(selectedWorkspace.path) && ws !== selectedWorkspace.id) continue
         activeGrants.push({
           terminal: String(data.terminalId || file.replace(/\.json$/, '')),
-          workspace: String(data.workspaceId || ''),
+          workspace: ws,
           agents: Array.isArray(data.allowedAgents) ? data.allowedAgents.map(String) : [],
           depth: Number(data.depth ?? 0),
           maxDepth: Number(data.maxDepth ?? 1),
@@ -799,7 +913,7 @@ export function buildPolicyReport(options?: {
     activeGrants,
     allowedCliCommands: [
       {
-        command: 'orca orchestration worker-start --agent <claude|antigravity|codex> --spec "<task>" --worktree current --json',
+        command: `orca orchestration worker-start --agent ${currentAgent} --spec "<task>" --worktree current --json`,
         description: 'Spawns a supervised worker in its own isolated OpenShell sandbox (depth + 1)',
       },
       {
@@ -826,11 +940,16 @@ export function buildPolicyReport(options?: {
     blockedFlags: ['--environment', '--from', '--server-url', '--token', '--terminal (for worker-start)'],
   }
 
+  const allSandboxes = listActiveSandboxes()
+  const activeSandboxes = allSandboxes.filter(sb => sb.agent === currentAgent)
+
   return {
     generatedAt: new Date().toISOString(),
     selectedWorkspace,
-    workspaces,
-    activeSandboxes: listActiveSandboxes(),
+    currentAgent,
+    activeAgentSessions: context.activeAgentSessions,
+    workspaces: [selectedWorkspace],
+    activeSandboxes,
     agents,
     permissionGroups,
     allCliRules,

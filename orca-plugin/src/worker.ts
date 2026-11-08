@@ -76,33 +76,30 @@ export function formatCliPolicySummary(workspacePath?: string): string {
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
-  let lastWorkspacePath: string | undefined
+  let lastAgent: string | undefined
 
   const refreshStatusBar = () => {
     if (!orca.host?.call) return
     try {
-      const report = buildPolicyReport({ workspacePath: lastWorkspacePath })
+      const report = buildPolicyReport({ agent: lastAgent })
       const activeCount = report.activeSandboxes.length
       const allowCount = report.allCliRules.filter(r => r.action === 'allow').length
       const text = activeCount > 0
-        ? `OpenShell: ${activeCount} sandbox${activeCount === 1 ? '' : 'es'} (${allowCount} CLI rules)`
-        : `OpenShell: Enforced (${allowCount} CLI rules)`
+        ? `OpenShell (${report.currentAgent}): ${activeCount} sandbox${activeCount === 1 ? '' : 'es'} (${allowCount} CLI rules)`
+        : `OpenShell (${report.currentAgent}): Enforced (${allowCount} CLI rules)`
       void orca.host.call('statusBar.update', {
         id: 'openshell-status',
         text,
         icon: 'layers',
         tone: activeCount > 0 ? 'accent' : 'success',
-        tooltip: `OpenShell Landlock & Network Enforced • ${activeCount} active sandbox(es) • ${allowCount} allowed CLI command patterns`,
+        tooltip: `Project: ${report.selectedWorkspace.name} • Agent: ${report.currentAgent} • ${activeCount} active sandbox(es) • ${allowCount} allowed CLI command patterns`,
         visible: true,
       }).catch(() => {})
     } catch {}
   }
 
   orca.hooks.on('agent.launch.before', (event, next) => {
-    if (event.workspaceId && event.workspaceId.includes('::/')) {
-      const wsPath = event.workspaceId.split('::')[1]
-      if (wsPath) lastWorkspacePath = wsPath
-    }
+    if (event.agent) lastAgent = event.agent
     if (!(event.agent in wrappers)) return next()
     try {
       const binDir = process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR || path.join(os.homedir(), '.local', 'bin')
@@ -133,23 +130,27 @@ export default function activate(orca: OrcaWorkerApi): void {
   })
 
   orca.panels?.handle('getPolicyReport', (input) => {
-    const req = (input && typeof input === 'object' ? input : {}) as { workspacePath?: string }
-    const wsPath = req.workspacePath || lastWorkspacePath
-    if (req.workspacePath) lastWorkspacePath = req.workspacePath
-    const report = buildPolicyReport({ workspacePath: wsPath })
+    const req = (input && typeof input === 'object' ? input : {}) as { workspacePath?: string; agent?: string }
+    const report = buildPolicyReport({
+      workspacePath: req.workspacePath,
+      agent: req.agent || lastAgent,
+    })
     refreshStatusBar()
     return report
   })
 
   orca.panels?.handle('evaluateCommand', (input) => {
-    const req = (input && typeof input === 'object' ? input : {}) as { command?: string; workspacePath?: string }
-    const report = buildPolicyReport({ workspacePath: req.workspacePath || lastWorkspacePath })
+    const req = (input && typeof input === 'object' ? input : {}) as { command?: string; workspacePath?: string; agent?: string }
+    const report = buildPolicyReport({
+      workspacePath: req.workspacePath,
+      agent: req.agent || lastAgent,
+    })
     return evaluateCommandPolicy(String(req.command || ''), report)
   })
 
   orca.commands?.register('openshell.inspectPolicies', () => {
     refreshStatusBar()
-    return formatCliPolicySummary(lastWorkspacePath)
+    return formatCliPolicySummary()
   })
 
   refreshStatusBar()
