@@ -5,7 +5,7 @@ import { ClaudeAdapter } from './agents/claude.js';
 import { CodexAdapter } from './agents/codex.js';
 import { AntigravityAdapter } from './agents/antigravity.js';
 import { runSandboxSession } from './runner.js';
-import { runAgyChatDaemon, runAgyChatExec } from './agy-chat-sandbox.js';
+import { runAgyChatDaemon, runAgyChatExec, runAgyPolicyAdd } from './agy-chat-sandbox.js';
 
 function getAdapter(target: string): AgentAdapter {
   switch (target.toLowerCase()) {
@@ -44,6 +44,10 @@ async function main(): Promise<void> {
       const shellName = process.argv[3] || 'zsh';
       const commandLine = process.argv[4] || '';
       const code = await runAgyChatExec(shellName, commandLine);
+      process.exit(code);
+    }
+    if (agentTarget === 'policy-add' || agentTarget === 'openshell-l7-allow') {
+      const code = await runAgyPolicyAdd(process.argv.slice(3));
       process.exit(code);
     }
     if (!agentTarget || agentTarget.startsWith('-')) {

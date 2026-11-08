@@ -166,4 +166,6 @@ export default function activate(orca: OrcaWorkerApi): void {
   })
 
   refreshStatusBar()
+  const timer = setInterval(refreshStatusBar, 3000)
+  timer.unref?.()
 }

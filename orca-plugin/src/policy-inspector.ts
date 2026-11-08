@@ -738,6 +738,41 @@ export function buildPolicyReport(options?: {
   const selectedWorkspace = context.workspace
   const currentAgent = context.currentAgent
 
+  const reqQueueDir = path.join(selectedWorkspace.path, '.orca-openshell-l7-requests')
+  if (fs.existsSync(reqQueueDir)) {
+    try {
+      const files = fs.readdirSync(reqQueueDir).filter(f => f.endsWith('.json')).sort()
+      for (const file of files) {
+        const fullPath = path.join(reqQueueDir, file)
+        try {
+          const req = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as Partial<AddL7PolicyRequest>
+          fs.unlinkSync(fullPath)
+          if (req.host) {
+            addL7Policy(
+              {
+                scope: req.scope || 'session',
+                host: req.host,
+                port: req.port,
+                action: req.action || 'allow',
+                method: req.method || 'GET',
+                path: req.path || '/**',
+                binary: req.binary || '*',
+                workspacePath: selectedWorkspace.path,
+                agent: currentAgent,
+              },
+              { homeDir, orcaPolicyDir }
+            )
+          }
+        } catch {
+          try { fs.unlinkSync(fullPath) } catch {}
+        }
+      }
+      if (fs.readdirSync(reqQueueDir).length === 0) {
+        try { fs.rmdirSync(reqQueueDir) } catch {}
+      }
+    } catch {}
+  }
+
   const wsName = path.basename(selectedWorkspace.path)
   const globalDefaultPolicy = parseOpenShellPolicyFile(path.join(homeDir, '.agents', 'policies', 'default.yaml'))
 

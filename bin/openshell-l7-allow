@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+import json, os, sys, time
+
+args = sys.argv[1:]
+req = {"scope": "session", "host": "", "port": 443, "method": "GET", "path": "/**", "binary": "*"}
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("--scope", "--host", "--method", "--path", "--binary") and i + 1 < len(args):
+        req[a[2:]] = args[i + 1]
+        i += 2
+    elif a == "--port" and i + 1 < len(args):
+        req["port"] = int(args[i + 1])
+        i += 2
+    else:
+        i += 1
+
+if not req["host"]:
+    sys.stderr.write("Usage: openshell-l7-allow --scope <session|workspace|global> --host <domain> [--port 443] [--method GET] [--path /**]\n")
+    sys.exit(1)
+
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+req_dir = os.path.join(root, ".orca-openshell-l7-requests")
+os.makedirs(req_dir, exist_ok=True)
+fname = os.path.join(req_dir, f"req-{int(time.time()*1000)}-{os.getpid()}.json")
+with open(fname, "w") as f:
+    json.dump(req, f)
+print(f"Queued L7 policy rule ({req['scope']}): {req['method']} https://{req['host']}:{req['port']}{req['path']}")

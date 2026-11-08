@@ -346,7 +346,7 @@ export async function runAgyChatDaemon(
       { source: resolvedRoot, destination: '/sandbox' },
     ];
     const policy = loadMergedAgyPolicy(resolvedRoot, projectName);
-    const providers = getExtraProviderNames();
+    const providers = [...new Set(['antigravity', ...getExtraProviderNames()])];
 
     logDebug(`Creating Antigravity Chat Mode sandbox ${sandboxName} for ${resolvedRoot}`);
     sandbox = OpenShellSandbox.create(
@@ -388,7 +388,35 @@ export async function runAgyChatDaemon(
         '-S', sshControlPath,
         '-F', sshConfigPath,
         sshHost,
-        'touch /tmp/.orca_sync_marker',
+        [
+          'mkdir -p /sandbox/.orca-delegate/bin',
+          `cat > /sandbox/.orca-delegate/bin/openshell-l7-allow <<'EOF'`,
+          '#!/usr/bin/env python3',
+          'import json, os, sys, time',
+          'args = sys.argv[1:]',
+          'req = {"scope": "session", "host": "", "port": 443, "method": "GET", "path": "/**", "binary": "*"}',
+          'i = 0',
+          'while i < len(args):',
+          '    a = args[i]',
+          '    if a in ("--scope", "--host", "--method", "--path", "--binary") and i + 1 < len(args):',
+          '        req[a[2:]] = args[i + 1]; i += 2',
+          '    elif a == "--port" and i + 1 < len(args):',
+          '        req["port"] = int(args[i + 1]); i += 2',
+          '    else:',
+          '        i += 1',
+          'if not req["host"]:',
+          '    sys.stderr.write("Usage: openshell-l7-allow --scope <session|workspace|global> --host <domain> [--port 443] [--method GET] [--path /**]\\n")',
+          '    sys.exit(1)',
+          f'req_dir = {shellQuote(`${containerRoot}/.orca-openshell-l7-requests`)}',
+          'os.makedirs(req_dir, exist_ok=True)',
+          'fname = os.path.join(req_dir, f"req-{int(time.time()*1000)}-{os.getpid()}.json")',
+          'with open(fname, "w") as f:',
+          '    json.dump(req, f)',
+          'print(f"Queued L7 policy rule ({req[\'scope\']}): {req[\'method\']} https://{req[\'host\']}:{req[\'port\']}{req[\'path\']}")',
+          'EOF',
+          'chmod 755 /sandbox/.orca-delegate/bin/openshell-l7-allow',
+          'touch /tmp/.orca_sync_marker',
+        ].join('\n'),
       ],
       { stdio: ['ignore', 'ignore', 'ignore'], timeout: 10000 }
     );
@@ -452,8 +480,47 @@ export async function runAgyChatDaemon(
     });
   }
 
+  const checkL7RequestQueue = () => {
+    const reqDir = path.join(resolvedRoot, '.orca-openshell-l7-requests');
+    if (!fs.existsSync(reqDir)) return;
+    try {
+      const files = fs.readdirSync(reqDir).filter(f => f.endsWith('.json')).sort();
+      for (const file of files) {
+        const fullPath = path.join(reqDir, file);
+        try {
+          const req = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as {
+            scope?: 'session' | 'workspace' | 'global';
+            host?: string;
+            port?: number;
+            method?: string;
+            path?: string;
+            binary?: string;
+          };
+          fs.unlinkSync(fullPath);
+          if (req.host) {
+            void runAgyPolicyAdd([
+              '--scope', req.scope || 'session',
+              '--host', req.host,
+              '--port', String(req.port || 443),
+              '--method', req.method || 'GET',
+              '--path', req.path || '/**',
+              '--binary', req.binary || '*',
+              '--sandbox', sandboxName,
+            ]);
+          }
+        } catch {
+          try { fs.unlinkSync(fullPath); } catch {}
+        }
+      }
+      if (fs.readdirSync(reqDir).length === 0) {
+        try { fs.rmdirSync(reqDir); } catch {}
+      }
+    } catch {}
+  };
+
   await new Promise<void>((resolve) => {
     const timer = setInterval(() => {
+      checkL7RequestQueue();
       if (harnessPid > 1 && !isPidAlive(harnessPid)) {
         clearInterval(timer);
         cleanup();
@@ -535,6 +602,15 @@ export async function runAgyChatExec(shellName: string, commandLine: string): Pr
   process.env.AG_SANDBOX_HOST_INTERNAL = '1';
   delete process.env.ANTIGRAVITY_HARNESS_PATH;
 
+  const trimmedCmd = commandLine.trim();
+  if (trimmedCmd.startsWith('openshell-l7-allow ')) {
+    const rawTokens = trimmedCmd
+      .slice('openshell-l7-allow '.length)
+      .match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
+      ?.map(t => t.replace(/^['"]|['"]$/g, '')) || [];
+    return runAgyPolicyAdd(rawTokens);
+  }
+
   const harnessPid = Number(process.env.AG_HARNESS_PID || process.ppid);
   const rawSessionKey = process.env.ORCA_AGENT_SESSION_ID || `ag-ppid-${harnessPid}`;
   const sessionDir = getAgySessionDir(rawSessionKey);
@@ -573,6 +649,183 @@ export async function runAgyChatExec(shellName: string, commandLine: string): Pr
     child.on('error', () => resolve(1));
   });
 
+  if (exitCode !== 0) {
+    const urlMatch = /https?:\/\/([a-zA-Z0-9.-]+)(?::(\d+))?(\/[^\s"']*)?/.exec(commandLine);
+    if (urlMatch && /\b(curl|wget|fetch|http|gh|npm|bun|pip|poetry|cargo|go)\b/.test(commandLine)) {
+      const host = urlMatch[1];
+      const port = urlMatch[2] || '443';
+      const urlPath = urlMatch[3] || '/**';
+      const methodMatch = /(?:-X|--request)\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)/i.exec(commandLine);
+      const method = methodMatch ? methodMatch[1].toUpperCase() : 'GET';
+      process.stderr.write(
+        `\n[OpenShell Egress Blocked] Target: ${method} https://${host}:${port}${urlPath} (sandbox: ${state.sandboxName})\n` +
+        `[OpenShell Hint] Ask the user via your interactive question tool (ask_question / AskUserQuestion) whether to allow this L7 rule for: (1) Session only, (2) Project, or (3) Global, then run:\n` +
+        `  openshell-l7-allow --scope <session|workspace|global> --host ${host} --port ${port} --method ${method} --path "${urlPath}"\n`
+      );
+    }
+  }
+
   syncSandboxDeltaToHost(state, sessionDir);
+
+  const reqDir = path.join(state.projectRoot, '.orca-openshell-l7-requests');
+  if (fs.existsSync(reqDir)) {
+    try {
+      const files = fs.readdirSync(reqDir).filter(f => f.endsWith('.json')).sort();
+      for (const file of files) {
+        const fullPath = path.join(reqDir, file);
+        try {
+          const req = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as {
+            scope?: 'session' | 'workspace' | 'global';
+            host?: string;
+            port?: number;
+            method?: string;
+            path?: string;
+            binary?: string;
+          };
+          fs.unlinkSync(fullPath);
+          if (req.host) {
+            await runAgyPolicyAdd([
+              '--scope', req.scope || 'session',
+              '--host', req.host,
+              '--port', String(req.port || 443),
+              '--method', req.method || 'GET',
+              '--path', req.path || '/**',
+              '--binary', req.binary || '*',
+              '--sandbox', state.sandboxName,
+            ]);
+          }
+        } catch {
+          try { fs.unlinkSync(fullPath); } catch {}
+        }
+      }
+      if (fs.readdirSync(reqDir).length === 0) {
+        try { fs.rmdirSync(reqDir); } catch {}
+      }
+    } catch {}
+  }
+
   return exitCode;
 }
+
+export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
+  process.env.AG_SANDBOX_HOST_INTERNAL = '1';
+  delete process.env.ANTIGRAVITY_HARNESS_PATH;
+
+  let scope: 'session' | 'workspace' | 'global' = 'session';
+  let host = '';
+  let port = 443;
+  let method = 'GET';
+  let urlPath = '/**';
+  let binary = '*';
+  let sandboxName = '';
+  let agent = 'antigravity';
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    const arg = rawArgs[i];
+    if (arg === '--scope' && rawArgs[i + 1]) scope = rawArgs[++i] as any;
+    else if (arg === '--host' && rawArgs[i + 1]) host = rawArgs[++i];
+    else if (arg === '--port' && rawArgs[i + 1]) port = Number(rawArgs[++i]) || 443;
+    else if (arg === '--method' && rawArgs[i + 1]) method = rawArgs[++i].toUpperCase();
+    else if (arg === '--path' && rawArgs[i + 1]) urlPath = rawArgs[++i];
+    else if (arg === '--binary' && rawArgs[i + 1]) binary = rawArgs[++i];
+    else if (arg === '--sandbox' && rawArgs[i + 1]) sandboxName = rawArgs[++i];
+    else if (arg === '--agent' && rawArgs[i + 1]) agent = rawArgs[++i];
+  }
+
+  if (!host) {
+    console.error('Usage: agent-box policy-add --scope <session|workspace|global> --host <domain> [--port 443] [--method GET] [--path "/**"]');
+    return 1;
+  }
+
+  const normalizedPath = urlPath.startsWith('/') ? urlPath : `/${urlPath}`;
+  const ruleName = `${host.replace(/[^a-zA-Z0-9]+/g, '_')}_l7`;
+  const projectRoot = resolveAgyProjectRoot(process.cwd(), process.ppid);
+
+  if (scope === 'workspace' || scope === 'global') {
+    const targetFile =
+      scope === 'workspace'
+        ? path.join(projectRoot, '.agents', 'policies', 'l7-custom.json')
+        : path.join(USER_HOME, '.agents', 'orca-openshell-policies', `${agent}.json`);
+    fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+    let doc: Record<string, any> = { version: 1, network_policies: {} };
+    if (fs.existsSync(targetFile)) {
+      try { doc = JSON.parse(fs.readFileSync(targetFile, 'utf8')); } catch {}
+    }
+    doc.version ??= 1;
+    doc.network_policies ??= {};
+    const existingPol = doc.network_policies[ruleName] || {
+      name: ruleName,
+      ...(binary !== '*' ? { binaries: [{ path: binary }] } : {}),
+      endpoints: [],
+    };
+    const endpoints: any[] = Array.isArray(existingPol.endpoints) ? existingPol.endpoints : [];
+    let ep = endpoints.find(e => e?.host === host && Number(e?.port || 443) === port);
+    if (!ep) {
+      ep = { host, port, protocol: 'rest', enforcement: 'enforce' };
+      endpoints.push(ep);
+    }
+    delete ep.access;
+    ep.rules = Array.isArray(ep.rules) ? ep.rules : [];
+    if (!ep.rules.some((r: any) => r?.allow?.method === method && r?.allow?.path === normalizedPath)) {
+      ep.rules.push({ allow: { method, path: normalizedPath } });
+    }
+    existingPol.endpoints = endpoints;
+    doc.network_policies[ruleName] = existingPol;
+    fs.writeFileSync(targetFile, JSON.stringify(doc, null, 2) + '\n', 'utf8');
+    console.log(`Saved persistent L7 rule (${scope}) to ${targetFile}`);
+  }
+
+  const targetSandboxes: string[] = [];
+  if (sandboxName) {
+    targetSandboxes.push(sandboxName);
+  } else {
+    try {
+      const out = execFileSync('openshell', ['sandbox', 'list'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      for (const line of out.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('NAME') || trimmed.startsWith('No sandboxes')) continue;
+        const parts = trimmed.split(/\s+/);
+        const name = parts[0];
+        const phase = parts[parts.length - 1] || '';
+        if (name && phase.toLowerCase() === 'ready') {
+          targetSandboxes.push(name);
+        }
+      }
+    } catch {}
+  }
+
+  for (const sb of targetSandboxes) {
+    try {
+      execFileSync(
+        'openshell',
+        [
+          'policy', 'update', sb,
+          '--rule-name', ruleName,
+          ...(binary !== '*' ? ['--binary', binary] : []),
+          '--add-endpoint', `${host}:${port}:read-write:rest:enforce`,
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }
+      );
+      execFileSync(
+        'openshell',
+        [
+          'policy', 'update', sb,
+          '--rule-name', ruleName,
+          ...(binary !== '*' ? ['--binary', binary] : ['--any-binary']),
+          '--add-allow', `${host}:${port}:${method}:${normalizedPath}`,
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }
+      );
+      console.log(`Live-applied L7 rule (${method} https://${host}:${port}${normalizedPath}) to sandbox ${sb}`);
+    } catch (err) {
+      console.error(`Failed to update sandbox ${sb}: ${err}`);
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
