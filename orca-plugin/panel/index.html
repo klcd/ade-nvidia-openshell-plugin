@@ -250,6 +250,48 @@
     padding: 2px 6px;
     font-size: 10.5px;
   }
+  details.app-fold {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  details.app-fold > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 8px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    user-select: none;
+    font-weight: 600;
+    font-size: 12px;
+  }
+  details.app-fold > summary::-webkit-details-marker {
+    display: none;
+  }
+  details.app-fold > summary:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .fold-chevron {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--muted-fg);
+    transition: transform 0.15s ease;
+    width: 12px;
+  }
+  details.app-fold[open] > summary .fold-chevron {
+    transform: rotate(90deg);
+  }
+  .app-fold-body {
+    padding: 8px 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--bg);
+  }
 </style>
 </head>
 <body>
@@ -316,6 +358,7 @@
     let activeTab = 'cli';
     let searchFilter = '';
     let actionFilter = 'all';
+    const openApps = new Set();
 
     function escapeHtml(str) {
       return String(str ?? '')
@@ -467,25 +510,41 @@
     function renderCliTab() {
       const selectedAgent = currentReport.currentAgent;
 
-      const groupsHtml = currentReport.permissionGroups.map(group => {
-        const filteredRules = group.rules.filter(r => {
-          if (!r.compatibleAgents.includes(selectedAgent)) return false;
-          if (actionFilter !== 'all' && r.action !== actionFilter) return false;
-          if (!searchFilter) return true;
-          const q = searchFilter.toLowerCase();
-          return r.cliCommand.toLowerCase().includes(q) ||
-                 r.raw.toLowerCase().includes(q) ||
-                 r.groupName.toLowerCase().includes(q);
-        });
-        if (filteredRules.length === 0) return '';
+      const filteredRules = currentReport.allCliRules.filter(r => {
+        if (!r.compatibleAgents.includes(selectedAgent)) return false;
+        if (actionFilter !== 'all' && r.action !== actionFilter) return false;
+        if (!searchFilter) return true;
+        const q = searchFilter.toLowerCase();
+        return r.cliCommand.toLowerCase().includes(q) ||
+               r.baseBinary.toLowerCase().includes(q) ||
+               r.raw.toLowerCase().includes(q) ||
+               r.groupName.toLowerCase().includes(q);
+      });
 
-        const rows = filteredRules.map(r => `
+      // Group rules by CLI application (baseBinary)
+      const byApp = new Map();
+      for (const r of filteredRules) {
+        const appKey = r.baseBinary || r.tool || 'other';
+        if (!byApp.has(appKey)) byApp.set(appKey, []);
+        byApp.get(appKey).push(r);
+      }
+
+      const sortedApps = [...byApp.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+      const appsHtml = sortedApps.map(([appName, rules]) => {
+        const allowCount = rules.filter(r => r.action === 'allow').length;
+        const askCount = rules.filter(r => r.action === 'ask').length;
+        const denyCount = rules.filter(r => r.action === 'deny').length;
+        const sources = [...new Set(rules.map(r => `${r.scope}:${r.groupName}`))].join(', ');
+        const isOpen = Boolean(searchFilter) || openApps.has(appName);
+
+        const rows = rules.map(r => `
           <div class="cmd-row">
             <div class="cmd-left">
               <div class="cmd-code">${escapeHtml(r.cliCommand)}</div>
               <div class="cmd-meta">
                 <span>Rule: <code class="mono">${escapeHtml(r.raw)}</code></span>
-                <span>• Binary: <code class="mono">${escapeHtml(r.baseBinary)}</code></span>
+                <span>• Source: <code class="mono">${escapeHtml(r.scope)}/${escapeHtml(r.sourceFile)}</code></span>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;">
@@ -496,18 +555,23 @@
         `).join('');
 
         return `
-          <div class="card">
-            <div class="card-title">
-              <span>${escapeHtml(group.name)} <span class="sub">(${escapeHtml(group.sourceFile)})</span></span>
-              <div style="display:flex;gap:4px;">
-                <span class="badge neutral">${escapeHtml(group.scope)}</span>
-                ${group.allowCount ? `<span class="badge allow">${group.allowCount} allow</span>` : ''}
-                ${group.denyCount ? `<span class="badge deny">${group.denyCount} deny</span>` : ''}
+          <details class="app-fold" data-app="${escapeHtml(appName)}" ${isOpen ? 'open' : ''}>
+            <summary>
+              <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+                <span class="fold-chevron">▶</span>
+                <code class="mono" style="font-size:12px;font-weight:700;">${escapeHtml(appName)}</code>
+                <span class="sub" style="font-weight:400;">(${rules.length} rule${rules.length === 1 ? '' : 's'} • ${escapeHtml(sources)})</span>
               </div>
+              <div style="display:flex;gap:4px;flex-shrink:0;">
+                ${allowCount ? `<span class="badge allow">${allowCount} allow</span>` : ''}
+                ${askCount ? `<span class="badge ask">${askCount} ask</span>` : ''}
+                ${denyCount ? `<span class="badge deny">${denyCount} deny</span>` : ''}
+              </div>
+            </summary>
+            <div class="app-fold-body">
+              ${rows}
             </div>
-            <div class="sub">${escapeHtml(group.description)}</div>
-            ${rows}
-          </div>
+          </details>
         `;
       }).join('');
 
@@ -515,15 +579,17 @@
         <div class="card">
           ${renderNativeSyncCard()}
           <div class="controls" style="margin-top:4px;">
-            <input id="ruleSearch" type="text" placeholder="Filter CLI commands (e.g. git, docker, kubectl, sudo, rm)..." value="${escapeHtml(searchFilter)}" />
-            <select id="actionSelect" style="max-width:130px;">
+            <input id="ruleSearch" type="text" placeholder="Filter CLI application or command (e.g. git, docker, kubectl, sudo)..." value="${escapeHtml(searchFilter)}" />
+            <select id="actionSelect" style="max-width:120px;">
               <option value="all" ${actionFilter === 'all' ? 'selected' : ''}>All Actions</option>
               <option value="allow" ${actionFilter === 'allow' ? 'selected' : ''}>Allowed Only</option>
               <option value="deny" ${actionFilter === 'deny' ? 'selected' : ''}>Blocked Only</option>
             </select>
+            <button id="expandAllBtn" class="copy-btn" title="Expand all CLI applications">Expand All</button>
+            <button id="collapseAllBtn" class="copy-btn" title="Collapse all CLI applications">Collapse All</button>
           </div>
         </div>
-        ${groupsHtml || '<div class="card"><div class="sub">No matching CLI permission rules found.</div></div>'}
+        ${appsHtml || '<div class="card"><div class="sub">No matching CLI permission rules found.</div></div>'}
       `;
     }
 
@@ -657,6 +723,34 @@
       if (activeTab === 'cli') container.innerHTML = renderCliTab();
       else if (activeTab === 'sandbox') container.innerHTML = renderSandboxTab();
       else container.innerHTML = renderDelegationTab();
+
+      container.querySelectorAll('details.app-fold').forEach(el => {
+        el.addEventListener('toggle', () => {
+          const app = el.dataset.app;
+          if (!app) return;
+          if (el.open) openApps.add(app);
+          else openApps.delete(app);
+        });
+      });
+
+      const expandAllBtn = document.getElementById('expandAllBtn');
+      if (expandAllBtn) {
+        expandAllBtn.addEventListener('click', () => {
+          container.querySelectorAll('details.app-fold').forEach(el => {
+            el.open = true;
+            if (el.dataset.app) openApps.add(el.dataset.app);
+          });
+        });
+      }
+      const collapseAllBtn = document.getElementById('collapseAllBtn');
+      if (collapseAllBtn) {
+        collapseAllBtn.addEventListener('click', () => {
+          openApps.clear();
+          container.querySelectorAll('details.app-fold').forEach(el => {
+            el.open = false;
+          });
+        });
+      }
 
       const ruleSearch = document.getElementById('ruleSearch');
       if (ruleSearch) {
