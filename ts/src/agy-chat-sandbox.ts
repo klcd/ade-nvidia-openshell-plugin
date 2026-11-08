@@ -815,9 +815,9 @@ export async function runAgyChatExec(shellName: string, commandLine: string): Pr
         '--sandbox', state.sandboxName,
       ]);
 
-      // Wait for OpenShell supervisor settings poll (~1s interval) and automatically retry
-      for (let attempt = 0; attempt < 5; attempt++) {
-        execFileSync('sleep', ['0.7']);
+      // runAgyPolicyAdd uses `openshell policy update --wait`, so the policy revision is already loaded
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt > 0) execFileSync('sleep', ['1']);
         result = await runRemoteSshCaptured(state, remoteScript);
         const stillBlocked = detectBlockedEgress(
           commandLine,
@@ -985,28 +985,35 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
   }
 
   const binFlags = effectiveBinaries.flatMap(b => ['--binary', b]);
+  const accessPreset = ['GET', 'HEAD', 'OPTIONS'].includes(method) ? 'read-only' : 'read-write';
+  const isWildcardPath = normalizedPath === '/**' || normalizedPath === '**';
+
   for (const sb of targetSandboxes) {
     try {
       execFileSync(
         'openshell',
         [
           'policy', 'update', sb,
+          ...(isWildcardPath && method !== 'DELETE' ? ['--wait'] : []),
           '--rule-name', ruleName,
           ...binFlags,
-          '--add-endpoint', `${host}:${port}:read-write:rest:enforce`,
+          '--add-endpoint', `${host}:${port}:${accessPreset}:rest:enforce`,
         ],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 25000 }
       );
-      execFileSync(
-        'openshell',
-        [
-          'policy', 'update', sb,
-          '--rule-name', ruleName,
-          ...binFlags,
-          '--add-allow', `${host}:${port}:${method}:${normalizedPath}`,
-        ],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }
-      );
+      if (!isWildcardPath || method === 'DELETE') {
+        execFileSync(
+          'openshell',
+          [
+            'policy', 'update', sb,
+            '--wait',
+            '--rule-name', ruleName,
+            ...binFlags,
+            '--add-allow', `${host}:${port}:${method}:${normalizedPath}`,
+          ],
+          { stdio: ['ignore', 'pipe', 'pipe'], timeout: 25000 }
+        );
+      }
       console.log(`Live-applied L7 rule (${method} https://${host}:${port}${normalizedPath}) to sandbox ${sb}`);
     } catch (err) {
       console.error(`Failed to update sandbox ${sb}: ${err}`);
