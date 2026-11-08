@@ -407,7 +407,7 @@ export async function runAgyChatDaemon(
           'if not req["host"]:',
           '    sys.stderr.write("Usage: openshell-l7-allow --scope <session|workspace|global> --host <domain> [--port 443] [--method GET] [--path /**]\\n")',
           '    sys.exit(1)',
-          f'req_dir = {shellQuote(`${containerRoot}/.orca-openshell-l7-requests`)}',
+          `req_dir = ${JSON.stringify(`${containerRoot}/.orca-openshell-l7-requests`)}`,
           'os.makedirs(req_dir, exist_ok=True)',
           'fname = os.path.join(req_dir, f"req-{int(time.time()*1000)}-{os.getpid()}.json")',
           'with open(fname, "w") as f:',
