@@ -27,6 +27,12 @@ export interface PermissionGroupSummary {
   rules: CliPermissionRule[]
 }
 
+export interface L7HttpRule {
+  action: 'allow' | 'deny'
+  method: string
+  path: string
+}
+
 export interface NetworkEndpointRule {
   policyName: string
   source: string
@@ -37,6 +43,7 @@ export interface NetworkEndpointRule {
   enforcement: string
   binaries: string[]
   compatibleCliCommands: string[]
+  l7Rules?: L7HttpRule[]
 }
 
 export interface AgentProfilePolicy {
@@ -127,6 +134,16 @@ export interface PolicyInspectionReport {
   nativeSync: NativeAgentSyncStatus
 }
 
+export interface L7PolicySuggestion {
+  ruleName: string
+  host: string
+  port: number
+  action: 'allow' | 'deny'
+  method: string
+  path: string
+  binary: string
+}
+
 export interface CommandEvaluationResult {
   command: string
   verdict: 'allow' | 'deny' | 'ask'
@@ -137,6 +154,30 @@ export interface CommandEvaluationResult {
     status: 'pass' | 'warn' | 'block'
     detail: string
   }>
+  l7Suggestion?: L7PolicySuggestion
+}
+
+export interface AddL7PolicyRequest {
+  scope: 'session' | 'workspace' | 'global'
+  sandboxName?: string
+  workspacePath?: string
+  agent?: string
+  ruleName?: string
+  host: string
+  port?: number
+  action?: 'allow' | 'deny'
+  method?: string
+  path?: string
+  binary?: string
+}
+
+export interface AddL7PolicyResult {
+  ok: boolean
+  scope: 'session' | 'workspace' | 'global'
+  message: string
+  targetFile?: string
+  appliedSandboxes?: string[]
+  cliCommandsRun?: string[]
 }
 
 /** Format a canonical pattern like `git status:*` into a readable CLI command syntax. */
@@ -289,16 +330,36 @@ export function parseOpenShellPolicyFile(filePath: string): ParsedOpenShellPolic
             : []
           for (const ep of netPol?.endpoints ?? []) {
             if (!ep?.host) continue
+            const l7Rules: L7HttpRule[] = []
+            for (const r of ep?.rules ?? []) {
+              if (r?.allow?.method || r?.allow?.path) {
+                l7Rules.push({
+                  action: 'allow',
+                  method: String(r.allow.method || '*'),
+                  path: String(r.allow.path || '/**'),
+                })
+              }
+            }
+            for (const d of ep?.deny_rules ?? []) {
+              if (d?.method || d?.path) {
+                l7Rules.push({
+                  action: 'deny',
+                  method: String(d.method || '*'),
+                  path: String(d.path || '/**'),
+                })
+              }
+            }
             result.endpoints.push({
               policyName: netPol?.name || policyKey,
               source: sourceLabel,
               host: String(ep.host),
               port: Number(ep.port || 443),
               protocol: String(ep.protocol || 'rest'),
-              access: String(ep.access || 'read-write'),
+              access: String(ep.access || (l7Rules.length > 0 ? 'l7-rules' : 'read-write')),
               enforcement: String(ep.enforcement || 'enforce'),
               binaries,
               compatibleCliCommands: compatibleCommandsForHost(String(ep.host)),
+              ...(l7Rules.length > 0 ? { l7Rules } : {}),
             })
           }
         }
@@ -1043,24 +1104,67 @@ export function evaluateCommandPolicy(command: string, report: PolicyInspectionR
     }
   }
 
-  // Network egress check if a URL or network tool is referenced
-  const urlMatch = /https?:\/\/([^/\s:]+)/.exec(trimmed)
+  // Network egress & L7 check if a URL or network CLI tool is referenced
+  let l7Suggestion: L7PolicySuggestion | undefined
+  const urlMatch = /https?:\/\/([^/\s:]+)(?::(\d+))?(\/[^\s"']*)?/.exec(trimmed)
+  const firstBin = trimmed.split(/\s+/)[0] || 'curl'
+  const inferredBinary = firstBin.startsWith('/') ? firstBin : `/usr/bin/${firstBin}`
+
   if (urlMatch) {
     const host = urlMatch[1].toLowerCase()
+    const port = urlMatch[2] ? Number(urlMatch[2]) : 443
+    const rawPath = urlMatch[3] || '/**'
+    const methodMatch = /(?:-X|--request)\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)/i.exec(trimmed)
+    const method = methodMatch ? methodMatch[1].toUpperCase() : 'GET'
+    const ruleName = `${host.replace(/[^a-z0-9]+/g, '_')}_l7`
+
+    l7Suggestion = {
+      ruleName,
+      host,
+      port,
+      action: 'allow',
+      method,
+      path: rawPath.endsWith('*') ? rawPath : `${rawPath.replace(/\/$/, '') || ''}/**`,
+      binary: '*',
+    }
+
     const allEndpoints = report.agents.flatMap(a => a.endpoints)
     const matchedEp = allEndpoints.find(ep => ep.host.toLowerCase() === host)
     if (matchedEp) {
+      const l7Summary = matchedEp.l7Rules?.length
+        ? ` [L7 rules: ${matchedEp.l7Rules.map(r => `${r.action.toUpperCase()} ${r.method} ${r.path}`).join(', ')}]`
+        : ''
       sandboxChecks.push({
-        layer: 'OpenShell mTLS Egress Proxy',
+        layer: 'OpenShell mTLS & L7 Egress Proxy',
         status: 'pass',
-        detail: `Host '${host}:${matchedEp.port}' is allowed (${matchedEp.access}) via ${matchedEp.policyName}.`,
+        detail: `Host '${host}:${matchedEp.port}' is allowed (${matchedEp.access}) via ${matchedEp.policyName}${l7Summary}.`,
       })
     } else {
       sandboxChecks.push({
-        layer: 'OpenShell mTLS Egress Proxy',
+        layer: 'OpenShell mTLS & L7 Egress Proxy',
         status: 'block',
-        detail: `Host '${host}' is not in any allowed network_policies endpoint list; egress will be denied.`,
+        detail: `Host '${host}:${port}' is not in any allowed network_policies endpoint list; egress will be denied unless an L7 policy is added.`,
       })
+    }
+  } else if (/^gh\s+/.test(trimmed)) {
+    l7Suggestion = {
+      ruleName: 'github_l7',
+      host: 'api.github.com',
+      port: 443,
+      action: 'allow',
+      method: /gh\s+(?:pr|issue)\s+(?:create|edit|comment|merge|close)/i.test(trimmed) ? 'POST' : 'GET',
+      path: '/repos/**',
+      binary: '/usr/bin/gh',
+    }
+  } else if (/^(?:npm|npx|bun)\s+/.test(trimmed)) {
+    l7Suggestion = {
+      ruleName: 'npm_registry_l7',
+      host: 'registry.npmjs.org',
+      port: 443,
+      action: 'allow',
+      method: 'GET',
+      path: '/**',
+      binary: '*',
     }
   }
 
@@ -1070,5 +1174,214 @@ export function evaluateCommandPolicy(command: string, report: PolicyInspectionR
     summary,
     matchedRules,
     sandboxChecks,
+    ...(l7Suggestion ? { l7Suggestion } : {}),
+  }
+}
+
+/**
+ * Dynamically adds an OpenShell L7 HTTP policy rule either:
+ * - 'session': live on the running sandbox(es) via `openshell policy update`
+ * - 'workspace': persisted to `<workspace>/.agents/policies/l7-custom.json` (and live-applied if a sandbox is running)
+ * - 'global': persisted to `~/.agents/orca-openshell-policies/<agent>.json` (and live-applied if a sandbox is running)
+ */
+export function addL7Policy(
+  req: AddL7PolicyRequest,
+  options?: { homeDir?: string; orcaPolicyDir?: string }
+): AddL7PolicyResult {
+  const homeDir = options?.homeDir || os.homedir()
+  const orcaPolicyDir =
+    options?.orcaPolicyDir ||
+    process.env.ORCA_OPENSHELL_POLICY_DIR ||
+    path.join(homeDir, '.agents', 'orca-openshell-policies')
+
+  const host = String(req.host || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+  if (!host || !/^[a-zA-Z0-9.-]+$/.test(host)) {
+    return {
+      ok: false,
+      scope: req.scope,
+      message: `Invalid hostname '${req.host}'. Provide a valid domain (e.g. api.github.com).`,
+    }
+  }
+
+  const port = Number(req.port || 443)
+  const action: 'allow' | 'deny' = req.action === 'deny' ? 'deny' : 'allow'
+  const method = String(req.method || 'GET').trim().toUpperCase() || 'GET'
+  const rawPath = String(req.path || '/**').trim()
+  const urlPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`
+  const binary = String(req.binary || '*').trim() || '*'
+  const ruleName =
+    String(req.ruleName || `${host.replace(/[^a-zA-Z0-9]+/g, '_')}_l7`)
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, '_') || 'custom_l7'
+
+  const cliCommandsRun: string[] = []
+  const appliedSandboxes: string[] = []
+  let targetFile: string | undefined
+
+  // 1. Persist to JSON policy file when scope is 'workspace' or 'global'
+  if (req.scope === 'workspace' || req.scope === 'global') {
+    if (req.scope === 'workspace') {
+      const wsPath = req.workspacePath || discoverCurrentOrcaContext().workspace.path
+      const policyDir = path.join(wsPath, '.agents', 'policies')
+      fs.mkdirSync(policyDir, { recursive: true })
+      targetFile = path.join(policyDir, 'l7-custom.json')
+    } else {
+      const agent = normalizeAgentId(req.agent) || discoverCurrentOrcaContext().currentAgent
+      fs.mkdirSync(orcaPolicyDir, { recursive: true })
+      targetFile = path.join(orcaPolicyDir, `${agent}.json`)
+    }
+
+    let doc: Record<string, any> = {
+      version: 1,
+      network_policies: {},
+    }
+    if (fs.existsSync(targetFile)) {
+      try {
+        doc = JSON.parse(fs.readFileSync(targetFile, 'utf8'))
+      } catch {}
+    }
+    doc.version ??= 1
+    doc.network_policies ??= {}
+
+    const existingPol = doc.network_policies[ruleName] || {
+      name: ruleName,
+      ...(binary !== '*' ? { binaries: [{ path: binary }] } : {}),
+      endpoints: [],
+    }
+    if (binary !== '*') {
+      const bins: Array<{ path: string }> = Array.isArray(existingPol.binaries) ? existingPol.binaries : []
+      if (!bins.some(b => b?.path === binary)) {
+        bins.push({ path: binary })
+      }
+      existingPol.binaries = bins
+    }
+
+    const endpoints: any[] = Array.isArray(existingPol.endpoints) ? existingPol.endpoints : []
+    let ep = endpoints.find(e => e?.host === host && Number(e?.port || 443) === port)
+    if (!ep) {
+      ep = {
+        host,
+        port,
+        protocol: 'rest',
+        enforcement: 'enforce',
+      }
+      endpoints.push(ep)
+    }
+    // OpenShell L7 rules cannot be combined with access presets on the same endpoint
+    delete ep.access
+
+    if (action === 'allow') {
+      ep.rules = Array.isArray(ep.rules) ? ep.rules : []
+      const exists = ep.rules.some(
+        (r: any) => r?.allow?.method === method && r?.allow?.path === urlPath
+      )
+      if (!exists) {
+        ep.rules.push({ allow: { method, path: urlPath } })
+      }
+    } else {
+      ep.deny_rules = Array.isArray(ep.deny_rules) ? ep.deny_rules : []
+      const exists = ep.deny_rules.some(
+        (d: any) => d?.method === method && d?.path === urlPath
+      )
+      if (!exists) {
+        ep.deny_rules.push({ method, path: urlPath })
+      }
+    }
+
+    existingPol.endpoints = endpoints
+    doc.network_policies[ruleName] = existingPol
+    fs.writeFileSync(targetFile, JSON.stringify(doc, null, 2) + '\n', 'utf8')
+  }
+
+  // 2. Apply dynamically to running sandbox(es) via `openshell policy update`
+  const targetSandboxes: string[] = []
+  if (req.sandboxName) {
+    targetSandboxes.push(req.sandboxName)
+  } else {
+    const agent = normalizeAgentId(req.agent) || discoverCurrentOrcaContext().currentAgent
+    for (const sb of listActiveSandboxes()) {
+      if (sb.agent === agent && sb.phase.toLowerCase() === 'ready') {
+        targetSandboxes.push(sb.name)
+      }
+    }
+  }
+
+  const liveErrors: string[] = []
+  for (const sbName of targetSandboxes) {
+    const step1Args = [
+      'policy',
+      'update',
+      sbName,
+      '--rule-name',
+      ruleName,
+      ...(binary !== '*' ? ['--binary', binary] : []),
+      '--add-endpoint',
+      `${host}:${port}:read-write:rest:enforce`,
+    ]
+    const step2Args = [
+      'policy',
+      'update',
+      sbName,
+      '--rule-name',
+      ruleName,
+      ...(binary !== '*' ? ['--binary', binary] : ['--any-binary']),
+      action === 'allow' ? '--add-allow' : '--add-deny',
+      `${host}:${port}:${method}:${urlPath}`,
+    ]
+    cliCommandsRun.push(`openshell ${step1Args.join(' ')}`)
+    cliCommandsRun.push(`openshell ${step2Args.join(' ')}`)
+
+    try {
+      execFileSync('openshell', step1Args, {
+        encoding: 'utf8',
+        timeout: 8000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      execFileSync('openshell', step2Args, {
+        encoding: 'utf8',
+        timeout: 8000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      appliedSandboxes.push(sbName)
+    } catch (err: any) {
+      liveErrors.push(`${sbName}: ${err?.stderr?.toString()?.trim() || err?.message || String(err)}`)
+    }
+  }
+
+  if (req.scope === 'session' && targetSandboxes.length === 0) {
+    return {
+      ok: false,
+      scope: 'session',
+      message: 'No running OpenShell sandbox found for the current agent. Start a sandbox first or save to Workspace / Global policy.',
+      cliCommandsRun,
+    }
+  }
+
+  if (req.scope === 'session' && appliedSandboxes.length === 0 && liveErrors.length > 0) {
+    return {
+      ok: false,
+      scope: 'session',
+      message: `Failed to apply live L7 policy: ${liveErrors.join('; ')}`,
+      cliCommandsRun,
+    }
+  }
+
+  const summaryParts: string[] = []
+  if (targetFile) {
+    summaryParts.push(`Saved L7 ${action.toUpperCase()} rule (${method} https://${host}:${port}${urlPath}) to ${targetFile}`)
+  }
+  if (appliedSandboxes.length > 0) {
+    summaryParts.push(`Live-applied to running sandbox(es): ${appliedSandboxes.join(', ')}`)
+  } else if (liveErrors.length > 0) {
+    summaryParts.push(`Live sandbox note: ${liveErrors.join('; ')}`)
+  }
+
+  return {
+    ok: true,
+    scope: req.scope,
+    message: summaryParts.join(' • '),
+    targetFile,
+    appliedSandboxes,
+    cliCommandsRun,
   }
 }

@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import activate, { bridgeCommand, formatCliPolicySummary } from './worker.ts'
-import { buildPolicyReport, evaluateCommandPolicy, parsePermissionYaml } from './policy-inspector.ts'
+import { addL7Policy, buildPolicyReport, evaluateCommandPolicy, parsePermissionYaml } from './policy-inspector.ts'
 
 test('rewrites Orca launch command while preserving flags and prompt', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-bridge-test-'))
@@ -135,6 +135,35 @@ test('parses permission policies coupled to CLI commands and evaluates command c
 
     const spoofEval = evaluateCommandPolicy('orca orchestration send --from forged --to coordinator --body "hi"', report)
     assert.equal(spoofEval.verdict, 'deny')
+
+    const curlEval = evaluateCommandPolicy('curl -X POST https://api.github.com/repos/klcd/nixos-config/issues', report)
+    assert.ok(curlEval.l7Suggestion)
+    assert.equal(curlEval.l7Suggestion.host, 'api.github.com')
+    assert.equal(curlEval.l7Suggestion.method, 'POST')
+    assert.equal(curlEval.l7Suggestion.path, '/repos/klcd/nixos-config/issues/**')
+
+    const addWorkspaceL7 = addL7Policy(
+      {
+        scope: 'workspace',
+        workspacePath: wsDir,
+        agent: 'codex',
+        host: 'api.github.com',
+        port: 443,
+        action: 'allow',
+        method: 'GET',
+        path: '/repos/**',
+        binary: '/usr/bin/gh',
+      },
+      { homeDir }
+    )
+    assert.equal(addWorkspaceL7.ok, true)
+    assert.ok(addWorkspaceL7.targetFile && fs.existsSync(addWorkspaceL7.targetFile))
+
+    const updatedReport = buildPolicyReport({ workspacePath: wsDir, agent: 'codex', homeDir })
+    const ghEp = updatedReport.agents[0].endpoints.find(ep => ep.host === 'api.github.com')
+    assert.ok(ghEp)
+    assert.equal(ghEp.l7Rules?.[0]?.method, 'GET')
+    assert.equal(ghEp.l7Rules?.[0]?.path, '/repos/**')
 
     const summary = formatCliPolicySummary(wsDir)
     assert.match(summary, /OpenShell Policy & CLI Command Report/)

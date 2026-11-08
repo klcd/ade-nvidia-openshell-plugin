@@ -3,7 +3,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildPolicyReport, evaluateCommandPolicy } from './policy-inspector.ts'
+import { addL7Policy, type AddL7PolicyRequest, buildPolicyReport, evaluateCommandPolicy } from './policy-inspector.ts'
 
 const wrappers: Record<string, string> = {
   codex: 'codex-box',
@@ -146,6 +146,18 @@ export default function activate(orca: OrcaWorkerApi): void {
       agent: req.agent || lastAgent,
     })
     return evaluateCommandPolicy(String(req.command || ''), report)
+  })
+
+  orca.panels?.handle('addL7Policy', (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as unknown as Partial<AddL7PolicyRequest>
+    const res = addL7Policy({
+      scope: req.scope || 'workspace',
+      host: req.host || '',
+      ...req,
+      agent: req.agent || lastAgent,
+    })
+    refreshStatusBar()
+    return res
   })
 
   orca.commands?.register('openshell.inspectPolicies', () => {

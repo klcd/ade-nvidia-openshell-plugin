@@ -336,8 +336,8 @@
       </div>
       <div class="chips" id="sampleCmds">
         <button class="copy-btn sample-cmd" data-cmd="git status -s">git status -s</button>
-        <button class="copy-btn sample-cmd" data-cmd="docker ps --format '{{.Names}}'">docker ps</button>
-        <button class="copy-btn sample-cmd" data-cmd="kubectl get pods -A">kubectl get pods</button>
+        <button class="copy-btn sample-cmd" data-cmd="curl -X GET https://api.github.com/repos/klcd/nixos-config">curl api.github.com (L7)</button>
+        <button class="copy-btn sample-cmd" data-cmd="gh pr view 115">gh pr view (L7)</button>
         <button class="copy-btn sample-cmd" id="sampleWorkerCmd" data-cmd="orca orchestration worker-start --agent claude --spec 'Run tests' --worktree current --json">orca worker-start</button>
         <button class="copy-btn sample-cmd" data-cmd="sudo rm -rf /">sudo rm -rf /</button>
       </div>
@@ -439,6 +439,45 @@
       document.getElementById('cliCount').textContent = String(agentRules.length);
     }
 
+    let lastL7Suggestion = null;
+
+    async function applyL7PolicyRule(payload, statusElId) {
+      const statusEl = document.getElementById(statusElId);
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="badge neutral">Applying L7 policy...</span>`;
+      }
+      try {
+        const res = await window.orca.plugin.request('addL7Policy', {
+          ...payload,
+          workspacePath: currentReport?.selectedWorkspace?.path,
+          agent: currentReport?.currentAgent,
+        });
+        if (statusEl) {
+          const cmdsHtml = (res.cliCommandsRun || []).map(c => `<div class="mono sub">$ ${escapeHtml(c)}</div>`).join('');
+          statusEl.innerHTML = `
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span class="badge ${res.ok ? 'allow' : 'deny'}">${res.ok ? 'APPLIED' : 'ERROR'}</span>
+              <span>${escapeHtml(res.message)}</span>
+            </div>
+            ${cmdsHtml}
+          `;
+        }
+        if (res.ok) {
+          const reportRes = await window.orca.plugin.request('getPolicyReport', {});
+          currentReport = reportRes;
+          renderHeader();
+          renderActiveTab();
+          const cmd = document.getElementById('cmdInput').value.trim();
+          if (cmd) await runCommandCheck(cmd);
+        }
+      } catch (err) {
+        if (statusEl) {
+          statusEl.innerHTML = `<span class="badge deny">Error</span><div>${escapeHtml(err?.message || err)}</div>`;
+        }
+      }
+    }
+
     async function runCommandCheck(command) {
       if (!command || !currentReport) return;
       const box = document.getElementById('evalOutput');
@@ -448,6 +487,7 @@
           workspacePath: currentReport.selectedWorkspace.path,
           agent: currentReport.currentAgent,
         });
+        lastL7Suggestion = res.l7Suggestion || null;
         box.style.display = 'flex';
         const badgeLabel = res.verdict.toUpperCase();
         const rulesHtml = (res.matchedRules || []).map(r =>
@@ -456,6 +496,21 @@
         const checksHtml = (res.sandboxChecks || []).map(c =>
           `<div class="cmd-meta"><span class="badge ${escapeHtml(c.status)}">${escapeHtml(c.status.toUpperCase())}</span> <strong>${escapeHtml(c.layer)}:</strong> <span>${escapeHtml(c.detail)}</span></div>`
         ).join('');
+        const l7ActionHtml = res.l7Suggestion
+          ? `<div style="margin-top:4px;padding-top:6px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:6px;">
+              <div class="cmd-meta">
+                <strong>L7 HTTP Rule:</strong>
+                <code class="mono">${escapeHtml(res.l7Suggestion.action.toUpperCase())} ${escapeHtml(res.l7Suggestion.method)} https://${escapeHtml(res.l7Suggestion.host)}:${res.l7Suggestion.port}${escapeHtml(res.l7Suggestion.path)}</code>
+                <span>(binary: <code class="mono">${escapeHtml(res.l7Suggestion.binary)}</code>)</span>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Hot-reload on running sandbox via openshell policy update">+ Add L7 for Session (Live Sandbox)</button>
+                <button class="copy-btn quick-l7-btn" data-l7-scope="workspace" title="Save to <project>/.agents/policies/l7-custom.json &amp; apply live">+ Add L7 for Project</button>
+                <button class="copy-btn quick-l7-btn" data-l7-scope="global" title="Save to ~/.agents/orca-openshell-policies/<agent>.json &amp; apply live">+ Add L7 in General (${escapeHtml(currentReport.currentAgent)})</button>
+              </div>
+              <div id="quickL7Status" style="display:none;" class="eval-result"></div>
+            </div>`
+          : '';
         box.innerHTML = `
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span class="badge ${escapeHtml(res.verdict)}">${escapeHtml(badgeLabel)}</span>
@@ -464,6 +519,7 @@
           <div class="sub">${escapeHtml(res.summary)}</div>
           ${rulesHtml}
           ${checksHtml}
+          ${l7ActionHtml}
         `;
       } catch (err) {
         box.style.display = 'flex';
@@ -596,6 +652,44 @@
     function renderSandboxTab() {
       const agents = currentReport.agents;
 
+      const l7ComposerHtml = `
+        <div class="card">
+          <div class="card-title">
+            <span>Add Dynamic L7 HTTP Egress Policy</span>
+            <span class="sub">Session (Hot-Reload) or Persistent</span>
+          </div>
+          <div class="controls">
+            <select id="l7Scope" style="max-width:190px;" title="Where to apply this L7 policy">
+              <option value="workspace">Project (${escapeHtml(currentReport.selectedWorkspace.name)}/.agents/policies)</option>
+              <option value="global">In General (~/.agents/orca-openshell-policies/${escapeHtml(currentReport.currentAgent)}.json)</option>
+              <option value="session">Current Session Only (Live Sandbox)</option>
+            </select>
+            <select id="l7Action" style="max-width:95px;">
+              <option value="allow">ALLOW</option>
+              <option value="deny">DENY</option>
+            </select>
+            <select id="l7Method" style="max-width:95px;">
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+              <option value="PUT">PUT</option>
+              <option value="PATCH">PATCH</option>
+              <option value="DELETE">DELETE</option>
+              <option value="*">* (ANY)</option>
+            </select>
+          </div>
+          <div class="controls">
+            <input id="l7Host" type="text" class="mono" placeholder="Host (e.g. api.github.com)" style="flex:2;" />
+            <input id="l7Port" type="text" class="mono" value="443" placeholder="Port" style="max-width:65px;" />
+            <input id="l7Path" type="text" class="mono" value="/repos/**" placeholder="Path glob (e.g. /repos/**)" style="flex:2;" />
+          </div>
+          <div class="controls">
+            <input id="l7Binary" type="text" class="mono" value="*" placeholder="Binary path (e.g. /usr/bin/gh or * for any)" style="flex:1;" />
+            <button id="addL7Btn" class="primary">Add L7 Policy</button>
+          </div>
+          <div id="l7ComposerStatus" style="display:none;" class="eval-result"></div>
+        </div>
+      `;
+
       const activeHtml = currentReport.activeSandboxes.length > 0
         ? `<div class="card">
             <div class="card-title"><span>Running OpenShell Sandboxes (${escapeHtml(currentReport.currentAgent)})</span><span class="badge allow">${currentReport.activeSandboxes.length} Ready</span></div>
@@ -647,8 +741,14 @@
             </div>
           </div>
 
-          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Allowed Network Egress Endpoints (Coupled to CLI Commands)</div>
-          ${a.endpoints.map(ep => `
+          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Allowed Network &amp; L7 Egress Endpoints (Coupled to CLI Commands)</div>
+          ${a.endpoints.map(ep => {
+            const l7Html = (ep.l7Rules || []).length > 0
+              ? `<div class="chips" style="margin-top:3px;">${ep.l7Rules.map(r =>
+                  `<span class="badge ${r.action === 'deny' ? 'deny' : 'allow'}">${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`
+                ).join('')}</div>`
+              : '';
+            return `
             <div class="cmd-row">
               <div class="cmd-left">
                 <div class="cmd-code">${escapeHtml(ep.host)}:${escapeHtml(ep.port)} <span class="sub">(${escapeHtml(ep.policyName)})</span></div>
@@ -656,14 +756,16 @@
                   <span>Compatible CLI: <code class="mono">${escapeHtml(ep.compatibleCliCommands.join(', '))}</code></span>
                   <span>• Source: ${escapeHtml(ep.source)}</span>
                 </div>
+                ${l7Html}
               </div>
               <span class="badge ${ep.access === 'read-only' ? 'neutral' : 'allow'}">${escapeHtml(ep.access)}</span>
             </div>
-          `).join('')}
+            `;
+          }).join('')}
         </div>
       `).join('');
 
-      return activeHtml + agentsHtml;
+      return l7ComposerHtml + activeHtml + agentsHtml;
     }
 
     function renderDelegationTab() {
@@ -752,6 +854,20 @@
         });
       }
 
+      const addL7Btn = document.getElementById('addL7Btn');
+      if (addL7Btn) {
+        addL7Btn.addEventListener('click', () => {
+          const scope = document.getElementById('l7Scope').value;
+          const action = document.getElementById('l7Action').value;
+          const method = document.getElementById('l7Method').value;
+          const host = document.getElementById('l7Host').value.trim();
+          const port = Number(document.getElementById('l7Port').value) || 443;
+          const path = document.getElementById('l7Path').value.trim() || '/**';
+          const binary = document.getElementById('l7Binary').value.trim() || '*';
+          applyL7PolicyRule({ scope, action, method, host, port, path, binary }, 'l7ComposerStatus');
+        });
+      }
+
       const ruleSearch = document.getElementById('ruleSearch');
       if (ruleSearch) {
         ruleSearch.addEventListener('input', (e) => {
@@ -779,6 +895,9 @@
 
       if (target.dataset.copy) {
         copyText(target.dataset.copy, target);
+      } else if (target.classList.contains('quick-l7-btn') && lastL7Suggestion) {
+        const scope = target.dataset.l7Scope || 'workspace';
+        applyL7PolicyRule({ ...lastL7Suggestion, scope }, 'quickL7Status');
       } else if (target.classList.contains('sample-cmd')) {
         const cmd = target.dataset.cmd || '';
         document.getElementById('cmdInput').value = cmd;
