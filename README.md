@@ -1,68 +1,107 @@
 # OpenShell Agent Bridges
 
-For Orca orchestration integration, see [the Orca integration status](docs/ORCA_INTEGRATION.md).
-The repository includes a versioned Orca launch hook in [`orca-plugin/`](orca-plugin/)
-and dedicated Orca policy files. Terminal Codex and Claude launches can be routed
-through the existing bridge; the coordinator-to-Orca delegation path remains
-unimplemented because the installed Orca CLI requires a full runtime token.
+Run **Claude Code**, **Google Antigravity**, and **OpenAI Codex** in disposable Linux sandboxes managed by NVIDIA OpenShell—both standalone and natively integrated with **Orca** (including in-sandbox worker orchestration).
 
-Run Codex, Claude Code, and Google Antigravity in disposable Linux sandboxes managed by NVIDIA OpenShell. The TypeScript bridge is the default installed implementation; the Python scripts in `bin/` are retained as reference bridges.
+For detailed Orca orchestration architecture and usage, see [`docs/ORCA_INTEGRATION.md`](docs/ORCA_INTEGRATION.md).
+
+The repository includes:
+- A trusted Orca launch hook plugin in [`orca-plugin/`](orca-plugin/) (`local.openshell-bridge`) that routes terminal launches of `claude`, `antigravity`/`agy`, and `codex` into isolated OpenShell sandboxes.
+- A host-side FIFO delegation broker (`orca-delegation`) that allows a sandboxed coordinator agent to securely spawn and supervise worker agents in separate OpenShell sandboxes without exposing host sockets or Orca runtime tokens.
+- Dedicated Orca Landlock & network policies in [`policies/`](policies/).
 
 ```mermaid
 flowchart LR
-    CLI[Agent CLI] --> Bridge[TypeScript bridge]
-    Bridge -->|stage workspace and policy| OS[OpenShell]
-    OS --> Box[Disposable Linux sandbox]
-    Box -->|approved workspace changes| Bridge
-    Bridge --> Host[Host workspace]
+    Orca[Orca Runtime / CLI] --> Hook[orca-plugin hook]
+    Hook --> Bridge[TypeScript bridge]
+    Bridge -->|stage workspace & policy| OS[OpenShell Gateway]
+    OS --> Box[Disposable Linux Sandbox]
+    Box <-->|FIFO over OpenShell exec| Broker[Host Delegation Broker]
+    Broker -->|bounded worker-start/show/read/check/send| Orca
+    Box -->|conflict-safe workspace merge| Bridge
+    Bridge --> Host[Host Workspace]
 ```
 
 ## Quick start
 
-Requirements: Docker with a running daemon, the OpenShell CLI, Bash, Python 3, and Bun to bundle the TypeScript source. The installer has an npm/TypeScript fallback. `yq` is optional but recommended for YAML policies. The project has been exercised on macOS; other host setups depend on OpenShell and Docker compatibility.
+Requirements: Docker with a running daemon, the OpenShell CLI, Orca CLI (`1.4.248+`), Bash, Python 3, and Bun to bundle the TypeScript source. `yq` is optional for YAML policies.
 
 From the repository root:
 
 ```sh
 ./install.sh
+./scripts/install-orca-host.sh
+orca plugin install "$(pwd)/orca-plugin" --json
 export PATH="$HOME/.local/bin:$PATH"
-codex-box
 ```
 
-The installer builds the three images, imports OpenShell profiles, installs policies under `~/.agents/policies/`, and installs `agy-box`, `codex-box`, and `claude-box` under `~/.local/bin/`. Use `./install.sh --rebuild` to rebuild images. `--help` and `--version` are passed through to a host agent when one is available.
+1. `./install.sh` builds the three container images (`openshell-claude:latest`, `openshell-antigravity:latest`, `openshell-codex:latest`), imports OpenShell provider profiles, and installs standalone wrappers.
+2. `./scripts/install-orca-host.sh` bundles and installs `agent-box` (`claude-box`, `agy-box`, `codex-box`), `orca-delegation`, `orca-delegation-shim.js`, and the Orca policies under `~/.agents/orca-openshell-policies/`.
+3. `orca plugin install` activates the `agent.launch.before` hook in Orca.
+
+### Standalone usage
 
 ```sh
-agy-box --print "Explain Landlock briefly"
-codex-box app-server   # Codex JSON-RPC app-server for IDE clients
 claude-box -p "Summarize the current changes"
+agy-box --prompt "Explain Landlock briefly"
+codex-box app-server
+```
+
+### Orca & In-Sandbox Worker Delegation
+
+When you launch a terminal agent in Orca (`orca agent launch --agent claude --surface terminal`), the plugin automatically wraps it in an OpenShell sandbox.
+
+To allow a coordinator terminal to spawn worker agents in their own isolated sandboxes:
+
+1. **Automatic Grant (Recommended)**:
+   Set `ORCA_AUTO_GRANT_DELEGATION=1` in your environment or add `<project>/.agents/delegation.json`:
+   ```json
+   {
+     "autoGrant": true,
+     "agents": ["claude", "antigravity", "codex"],
+     "maxWorkers": 2,
+     "maxDepth": 1
+   }
+   ```
+2. **Manual Grant**:
+   ```sh
+   ~/.local/bin/orca-delegation grant \
+     --terminal '<handle>' --workspace 'id:<workspace-id>' \
+     --agents claude,antigravity,codex --max-workers 2 --max-depth 1
+   ```
+
+Inside the coordinator sandbox, standard Orca orchestration commands work transparently via the shim:
+```sh
+orca orchestration worker-start --spec "Run tests and report status" --agent claude --worktree current --json
+orca orchestration worker-show --dispatch '<dispatch-id>' --json
+orca orchestration worker-read --dispatch '<dispatch-id>' --json
+orca orchestration check --peek --json
 ```
 
 ## How a session works
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant Bridge
-    participant OpenShell
-    participant Sandbox
+    participant User as User / Orca
+    participant Bridge as TypeScript Bridge
+    participant OpenShell as OpenShell Gateway
+    participant Sandbox as Linux Sandbox
     User->>Bridge: Start agent command
-    Bridge->>Bridge: Find workspace, merge policy, stage config
-    Bridge->>OpenShell: Create sandbox with providers and uploads
-    OpenShell->>Sandbox: Apply policy and start agent
-    Sandbox-->>Bridge: Stream agent output
-    Bridge-->>User: Forward output
-    User->>Bridge: Exit or interrupt
-    Bridge->>OpenShell: Sync permitted changes and delete sandbox
+    Bridge->>Bridge: Snapshot workspace, merge policies, stage config & shim
+    Bridge->>OpenShell: Provision credentials & create sandbox with uploads
+    OpenShell->>Sandbox: Enforce Landlock + network policy & start agent
+    Sandbox-->>Bridge: Stream terminal I/O & FIFO delegation requests
+    User->>Bridge: Exit or close terminal
+    Bridge->>OpenShell: Download & 3-way merge nonconflicting workspace changes
+    Bridge->>OpenShell: Delete sandbox
 ```
-
-The workspace is discovered from the Git root, or the current directory if it is not in a Git repository. By default, standalone sessions can write throughout the workspace. Paseo delegated sessions are read-only unless `ORCA_SANDBOX_WRITE_PATHS` grants specific paths. Codex app-server mode uses newline-delimited JSON-RPC over stdio and rewrites workspace paths for the sandbox.
 
 ## Configuration
 
-Policies are read from `~/.agents/policies/` and `<project>/.agents/policies/`. JSON and YAML files are merged; filesystem path rules are combined and deduplicated, while later processed scalar and same-name network settings replace earlier ones. Start with the examples in [`policies/`](policies/).
+Policies are read from `~/.agents/policies/` (or `~/.agents/orca-openshell-policies/` for Orca launches) and merged with project-specific policies in `<project>/.agents/policies/`.
 
 | Variable | Purpose |
 | --- | --- |
+| `ORCA_AUTO_GRANT_DELEGATION` | Set to `1` to automatically grant top-level Orca coordinator terminals permission to delegate workers (`depth: 0 -> 1`). |
 | `ORCA_SANDBOX_WRITE_PATHS` | JSON array of existing relative file or directory paths allowed to be written, such as `'["src","README.md"]'`. Paths cannot include `.git`, escape the workspace, or traverse symlinks. |
 | `ORCA_SANDBOX_EXTRA_PROVIDERS` | JSON array of additional OpenShell provider names, such as `'["github"]'`. |
 | `ORCA_SANDBOX_CPU` | Optional CPU limit, for example `2` or `500m`. |
@@ -71,7 +110,7 @@ Policies are read from `~/.agents/policies/` and `<project>/.agents/policies/`. 
 
 When `PASEO_AGENT_ID` is set, an omitted write-path list means no project paths are writable. The agent's private configuration area remains writable inside its sandbox. Scoped sessions sync back only the selected workspace paths.
 
-Credentials are collected from supported host environment variables and agent configuration files, then registered with OpenShell providers. Codex reads `~/.codex/auth.json` and `OPENAI_API_KEY`; Claude reads `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `CLAUDE_API_KEY` (also macOS Keychain); Antigravity reads Google token variables and `~/.gemini` auth files. The bridge replaces known credential values in staged files and blocks uploads if it finds those values in the workspace. This scan only knows credentials the bridge discovered; it is not a general secret scanner. See [the security notes](docs/SECURITY.md).
+Credentials are collected from supported host environment variables, macOS Keychain (`Claude Code-credentials-*`), and agent configuration files, then registered with OpenShell providers using profile-accepted keys. The bridge replaces known credential values in staged files with OpenShell placeholders and blocks uploads if it finds raw credentials in the workspace. See [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ## Paseo
 
@@ -81,30 +120,36 @@ Set the provider command in Paseo's `~/.paseo/config.json` to the installed wrap
 {
   "agents": {
     "providers": {
+      "claude": { "command": ["/Users/you/.local/bin/claude-box"] },
       "codex": { "command": ["/Users/you/.local/bin/codex-box"] }
     }
   }
 }
 ```
 
-Use the matching `claude-box` or `agy-box` command for other providers. Configure delegated scopes through an agent-specific launch environment; provider-level environment settings apply to every agent using that provider.
+## Testing & Verification
 
-## Troubleshooting
+```sh
+# Typecheck and unit tests
+node ts/node_modules/typescript/bin/tsc --noEmit -p ts/tsconfig.json
+node ts/node_modules/typescript/bin/tsc --noEmit -p orca-plugin/tsconfig.json
+(cd ts && bun test)
+orca plugin test orca-plugin --json
 
-- **`openshell` or Docker unavailable:** verify both commands are on `PATH` and the Docker daemon is running.
-- **Provider authentication fails:** rerun the installer to import/update profiles, then confirm the agent is signed in on the host.
-- **Sandbox creation or policy fails:** inspect `~/.orca/openshell-bridge.log`; if using `ORCA_SANDBOX_BOUNDARY_POLICY`, confirm `openshell-prover` is installed and the boundary file is readable.
-- **A scoped path is rejected:** it must already exist, be relative to the project root, and contain no symlink traversal or `.git` metadata.
-
-## Development
-
-The TypeScript source is in `ts/src/`. With Bun installed, run `cd ts && bun run typecheck` to check types or `bun run bundle` to create the standalone executable. The installer includes an npm build fallback.
+# Live OpenShell smoke tests
+./scripts/smoke-bridge.sh claude
+./scripts/smoke-bridge.sh antigravity
+./scripts/smoke-isolation.sh claude
+./scripts/smoke-delegation-transport.sh claude
+./scripts/smoke-orca-worker.sh '<coordinator-handle>' '<workspace-id>' '<coordinator-sandbox-name>' claude
+```
 
 ## Repository map
 
-- `ts/src/` — default TypeScript bridge and agent adapters
-- `bin/` — installed wrappers and Python reference bridges
-- `docker/` — base and per-agent container images
-- `profiles/` — OpenShell provider profiles
-- `policies/` — default and agent network/filesystem policy examples
-- `docs/` — security notes and historical integration report
+- `ts/src/` — TypeScript bridge, agent adapters (`claude`, `antigravity`, `codex`), FIFO delegation broker, and conflict-safe workspace merger
+- `orca-plugin/` — Orca `agent.launch.before` worker plugin (`local.openshell-bridge`)
+- `scripts/` — Host installer and live smoke test suite
+- `docker/` — Base and per-agent container Dockerfiles
+- `profiles/` — OpenShell provider profiles (`claude-code`, `antigravity`, `codex`, `codex-orca`)
+- `policies/` — Default and Orca-specific Landlock & network policies
+- `docs/` — [`ORCA_INTEGRATION.md`](docs/ORCA_INTEGRATION.md), [`SECURITY.md`](docs/SECURITY.md), and [`OPENSHELL_CODEX_ORCA_INTEGRATION.md`](docs/OPENSHELL_CODEX_ORCA_INTEGRATION.md)

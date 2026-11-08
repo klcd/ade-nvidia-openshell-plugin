@@ -90,6 +90,18 @@ orca agent launch --agent claude --surface terminal --worktree 'id:<workspace-id
   --agents claude,antigravity,codex --max-workers 2 --max-depth 1
 ```
 
+Alternatively, enable automatic depth-0 coordinator grants by setting
+`ORCA_AUTO_GRANT_DELEGATION=1` on the host or creating `<project>/.agents/delegation.json`:
+
+```json
+{
+  "autoGrant": true,
+  "agents": ["claude", "antigravity", "codex"],
+  "maxWorkers": 2,
+  "maxDepth": 1
+}
+```
+
 The grant command verifies that the terminal is a supported Orca agent in the
 named workspace. Revoke with `~/.local/bin/orca-delegation revoke --terminal
 '<handle>'`. The bridge also removes its grant when the terminal exits.
@@ -109,11 +121,13 @@ inside the sandbox. It never asks the host to read a sandbox-supplied path.
 
 `policies/orca-codex.json`, `policies/orca-claude.json`, and
 `policies/orca-antigravity.json` require hard Landlock and have no explicit
-network destinations. Attached provider profiles allow only their listed model
-API hosts on port 443. There is no Orca runtime network rule; the coordinator
-talks to its broker through local FIFOs and OpenShell exec. Coordinator and
-worker egress policies are currently the same because the Orca launch hook does
-not identify worker role. Per-workspace write scopes can be configured with
+network destinations. Any repository-specific policies in `<project>/.agents/policies/`
+are merged on top of the base Orca policy while preserving the hard Landlock
+requirement. Attached provider profiles allow only their listed model API hosts
+on port 443. There is no Orca runtime network rule; the coordinator talks to its
+broker through local FIFOs and OpenShell exec. Coordinator and worker egress
+policies are currently the same because the Orca launch hook does not identify
+worker role. Per-workspace write scopes can be configured with
 `ORCA_SANDBOX_WRITE_PATHS` on the host.
 
 OpenCode remains unsupported because this bridge has no OpenCode runner or
