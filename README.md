@@ -35,8 +35,8 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 1. `./install.sh` builds the three container images (`openshell-claude:latest`, `openshell-antigravity:latest`, `openshell-codex:latest`), imports OpenShell provider profiles, and installs standalone wrappers.
-2. `./scripts/install-orca-host.sh` bundles and installs `agent-box` (`claude-box`, `agy-box`, `codex-box`), `orca-delegation`, `orca-delegation-shim.js`, and the Orca policies under `~/.agents/orca-openshell-policies/`.
-3. `orca plugin install` activates the `agent.launch.before` hook in Orca.
+2. `./scripts/install-orca-host.sh` bundles and installs `agent-box` (`claude-box`, `agy-box`, `codex-box`), `orca-delegation`, `orca-delegation-shim.js`, the Orca policies under `~/.agents/orca-openshell-policies/`, and configures Orca's `agentCmdOverrides` so **both Chat Mode (`--surface chat`) and Terminal Mode (`--surface terminal`)** launch inside OpenShell sandboxes.
+3. `orca plugin install` activates the `agent.launch.before` hook in Orca for terminal launches.
 
 ### Standalone usage
 
@@ -46,11 +46,12 @@ agy-box --prompt "Explain Landlock briefly"
 codex-box app-server
 ```
 
-### Orca & In-Sandbox Worker Delegation
+### Orca Chat Mode, Terminal Mode & In-Sandbox Worker Delegation
 
-When you launch a terminal agent in Orca (`orca agent launch --agent claude --surface terminal`), the plugin automatically wraps it in an OpenShell sandbox.
+- **Chat Mode (`surface: "chat"`)**: Launching Claude or Codex from the Orca frontend UI (or `orca agent launch --agent claude --surface chat`) runs `claude-box` / `codex-box` with `ORCA_STRUCTURED_SESSION=1` over full-duplex SSH streaming (`openshell sandbox ssh-config`), rewrites host/container paths in real time, and merges workspace changes and session transcripts back to the host at the end of every turn. *(Note: Antigravity in Orca Chat Mode uses Orca's internal `agy_acp_server.par` runtime; use Terminal Mode for `agy-box` sandboxes).*
+- **Terminal Mode (`surface: "terminal"`)**: Launching any supported agent in an Orca terminal (`orca agent launch --agent claude --surface terminal`) wraps the interactive TUI inside an OpenShell sandbox via the `local.openshell-bridge` launch hook.
 
-To allow a coordinator terminal to spawn worker agents in their own isolated sandboxes:
+To allow a coordinator (in either Chat Mode or Terminal Mode) to spawn worker agents in their own isolated sandboxes:
 
 1. **Automatic Grant (Recommended)**:
    Set `ORCA_AUTO_GRANT_DELEGATION=1` in your environment or add `<project>/.agents/delegation.json`:

@@ -16,7 +16,25 @@ import { createJsonRpcPathTransform } from './protocols/jsonrpc.js';
 import { applyWorkspaceWriteScope, getExtraProviderNames, getWorkspaceWritePaths } from './sandbox-scope.js';
 import { DelegationBroker, recordLaunch, forgetLaunch, revokeGrant, readGrant, writeGrant } from './delegation.js';
 import { CodexAdapter } from './agents/codex.js';
+import { ClaudeAdapter } from './agents/claude.js';
 import { mergeWorkspace, snapshotWorkspace } from './workspace-merge.js';
+
+function resolveOrcaWorkspaceId(projectRoot: string): string {
+  if (process.env.OPENSHELL_BRIDGE_WORKSPACE_ID) return process.env.OPENSHELL_BRIDGE_WORKSPACE_ID;
+  if (process.env.ORCA_STRUCTURED_SESSION !== '1') return '';
+  try {
+    const out = execFileSync('orca', ['worktree', 'list', '--json'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const parsed = JSON.parse(out) as { result?: { worktrees?: Array<{ id?: string; path?: string }> } };
+    const match = parsed.result?.worktrees?.find(w => w.path === projectRoot);
+    return match?.id || '';
+  } catch {
+    return '';
+  }
+}
 
 export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]): Promise<number> {
   const cwd = process.cwd();
@@ -39,16 +57,24 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   const projectRoot = detectProjectRoot(cwd);
   const projectName = path.basename(projectRoot);
   const workspaceWritePaths = getWorkspaceWritePaths(projectRoot);
-  const orcaSession = process.env.OPENSHELL_BRIDGE_REQUIRED === '1';
-  const baseline = orcaSession ? snapshotWorkspace(projectRoot) : null;
+  const structuredSession = process.env.ORCA_STRUCTURED_SESSION === '1';
+  const orcaSession =
+    process.env.OPENSHELL_BRIDGE_REQUIRED === '1' ||
+    process.env.ORCA_OPENSHELL_REQUIRED === '1' ||
+    structuredSession;
+  let baseline = orcaSession ? snapshotWorkspace(projectRoot) : null;
   const prefixMap: Record<string, string> = { claude: 'cc', codex: 'cx', agy: 'ag' };
   const prefix = prefixMap[agent.type] || 'sb';
   const sandboxName = generateSandboxName(prefix, projectName);
 
-  logDebug(`Starting ${agent.type} session for ${projectName} (sandbox: ${sandboxName})`);
+  logDebug(`Starting ${agent.type} session for ${projectName} (sandbox: ${sandboxName}, structured: ${structuredSession})`);
 
   // 3. Discover and merge policies
-  const explicitPolicy = process.env.OPENSHELL_BRIDGE_POLICY_FILE ?? process.env.ORCA_OPENSHELL_POLICY_FILE;
+  const defaultOrcaPolicy = path.join(os.homedir(), '.orca', 'plugins', 'openshell-bridge', 'policies', 'orca-standard.yaml');
+  const explicitPolicy =
+    process.env.OPENSHELL_BRIDGE_POLICY_FILE ??
+    process.env.ORCA_OPENSHELL_POLICY_FILE ??
+    (orcaSession && fs.existsSync(defaultOrcaPolicy) ? defaultOrcaPolicy : undefined);
   const projectPolicy = mergePolicies([path.join(projectRoot, '.agents', 'policies')]);
   const policy: OpenShellPolicy = explicitPolicy
     ? mergeTwoPolicies(
@@ -56,7 +82,7 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
         projectPolicy
       )
     : (discoverAndMergePolicies(projectRoot) ?? { version: 1 });
-  if (process.env.OPENSHELL_BRIDGE_REQUIRED === '1' || process.env.ORCA_OPENSHELL_REQUIRED === '1') {
+  if (orcaSession) {
     if (!policy.filesystem_policy) {
       throw new Error('Orca OpenShell launches require a filesystem policy');
     }
@@ -79,7 +105,7 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
 
   const credentials = await agent.getCredentials();
   const extraProviders = getExtraProviderNames();
-  const orcaCodex = agent.type === 'codex' && process.env.OPENSHELL_BRIDGE_REQUIRED === '1';
+  const orcaCodex = agent.type === 'codex' && (process.env.OPENSHELL_BRIDGE_REQUIRED === '1' || structuredSession);
   const providerName = orcaCodex ? 'codex-orca' : agent.providerName;
   assertNoCredentialLeak(projectRoot, credentials);
 
@@ -89,9 +115,12 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   ];
 
   const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), `${agent.type}-stage-${process.pid}-`));
-  const terminalId = process.env.OPENSHELL_BRIDGE_TERMINAL_ID || '';
-  const workspaceId = process.env.OPENSHELL_BRIDGE_WORKSPACE_ID || '';
-  const enableDelegation = Boolean(terminalId && workspaceId && process.env.OPENSHELL_BRIDGE_REQUIRED === '1');
+  const terminalId =
+    process.env.OPENSHELL_BRIDGE_TERMINAL_ID ||
+    process.env.ORCA_TERMINAL_HANDLE ||
+    (process.env.ORCA_AGENT_SESSION_ID ? `structured-agent-session-${process.env.ORCA_AGENT_SESSION_ID}` : '');
+  const workspaceId = resolveOrcaWorkspaceId(projectRoot);
+  const enableDelegation = Boolean(terminalId && workspaceId && orcaSession);
   let uploads: Array<{ source: string; destination: string }>;
   try {
     // Stage files before creating the sandbox. OpenShell's create-time uploads
@@ -162,14 +191,41 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   }
 
   let cleanupDone = false;
+  let syncing = false;
+  let dirtySinceLastSync = true;
   let broker: DelegationBroker | null = null;
-  const cleanup = async (): Promise<void> => {
-    if (cleanupDone) return;
-    cleanupDone = true;
-    logDebug(`Cleaning up sandbox ${sandboxName}`);
-    broker?.stop();
-    forgetLaunch(terminalId);
-    revokeGrant(terminalId);
+
+  // Spawn a lightweight parent-PID watchdog so that even if Orca's teardown
+  // supervisor sends SIGKILL to this bridge process, the OpenShell sandbox is
+  // guaranteed to be deleted once this process exits.
+  let watchdogPid: number | undefined;
+  try {
+    const watchdog = spawn(
+      process.execPath,
+      [
+        '-e',
+        `const { execFileSync } = require('node:child_process');
+         const ppid = Number(process.argv[1]);
+         const name = process.argv[2];
+         const timer = setInterval(() => {
+           try { process.kill(ppid, 0); } catch {
+             clearInterval(timer);
+             try { execFileSync('openshell', ['sandbox', 'delete', name], { stdio: 'ignore', timeout: 15000 }); } catch {}
+             process.exit(0);
+           }
+         }, 1000);`,
+        String(process.pid),
+        sandboxName,
+      ],
+      { detached: true, stdio: 'ignore' }
+    );
+    watchdogPid = watchdog.pid;
+    watchdog.unref();
+  } catch {}
+
+  const syncSandboxToHost = async (): Promise<void> => {
+    if (syncing) return;
+    syncing = true;
     try {
       if (baseline) {
         if (workspaceWritePaths?.length !== 0) {
@@ -180,21 +236,43 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
             if (!sandbox.download(`/sandbox/${projectName}`, downloaded)) throw new Error('Sandbox download failed');
             const conflictRoot = path.join(os.homedir(), '.orca', 'openshell-conflicts', sandboxName);
             const result = mergeWorkspace(projectRoot, downloaded, baseline, workspaceWritePaths, conflictRoot);
+            baseline = snapshotWorkspace(projectRoot);
             logDebug(`Workspace merge for ${sandboxName}: ${result.applied} changes applied, ${result.conflicts.length} conflicts${result.conflicts.length ? ` at ${conflictRoot}` : ''}`);
           } finally { fs.rmSync(downloadRoot, { recursive: true, force: true }); }
+        }
+        if (agent.type === 'claude') {
+          await (agent as ClaudeAdapter).syncTranscriptsOnly(sandboxName, projectRoot, projectName);
         }
       } else {
         await agent.syncBack(sandboxName, projectRoot, projectName, workspaceWritePaths);
       }
+      dirtySinceLastSync = false;
     } catch (e) {
       logDebug(`Sync back error: ${e}`);
+    } finally {
+      syncing = false;
+    }
+  };
+
+  const cleanup = async (): Promise<void> => {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    logDebug(`Cleaning up sandbox ${sandboxName}`);
+    broker?.stop();
+    forgetLaunch(terminalId);
+    revokeGrant(terminalId);
+    if (dirtySinceLastSync) {
+      await syncSandboxToHost();
     }
     sandbox.delete();
+    if (watchdogPid) {
+      try { process.kill(watchdogPid, 'SIGTERM'); } catch {}
+    }
   };
 
   let runningExec: ReturnType<typeof spawn> | null = null;
   const handleSignal = (signal: NodeJS.Signals) => {
-    // Let the OpenShell exec session terminate before downloading or deleting its sandbox.
+    // Let the OpenShell exec/ssh session terminate before downloading or deleting its sandbox.
     runningExec?.kill(signal);
   };
 
@@ -245,20 +323,44 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
         '--env', 'PATH=/sandbox/.orca-delegate/bin:/usr/local/go/bin:/home/ubuntu/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin');
     }
 
+    const jsonStreamMode =
+      (agent.type === 'codex' && rawArgs.includes('app-server')) ||
+      (agent.type === 'claude' && ClaudeAdapter.isStreamJsonMode(rawArgs));
+
+    let spawnCommand = 'openshell';
+    let spawnArgs = execArgs;
+    if (jsonStreamMode) {
+      // `openshell sandbox exec` buffers stdin until EOF before calling the
+      // unary ExecSandbox RPC, which breaks persistent bidirectional protocols
+      // (`claude --input-format stream-json` and `codex app-server`).
+      // Use `ssh -T` via `openshell sandbox ssh-config` for real-time full-duplex streaming.
+      const sshConfigContent = execFileSync('openshell', ['sandbox', 'ssh-config', sandboxName], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10000,
+      });
+      const sshConfigPath = path.join(stageDir, 'ssh_config');
+      fs.writeFileSync(sshConfigPath, sshConfigContent, { mode: 0o600 });
+      spawnCommand = 'ssh';
+      spawnArgs = buildStreamingSshArgs(execArgs, sshConfigContent, sshConfigPath);
+    }
+
     return await new Promise<number>((resolve) => {
-      const appServerMode = agent.type === 'codex' && rawArgs.includes('app-server');
-      const child = spawn('openshell', execArgs, {
-        stdio: appServerMode ? ['pipe', 'pipe', 'inherit'] : 'inherit',
+      const child = spawn(spawnCommand, spawnArgs, {
+        stdio: jsonStreamMode ? ['pipe', 'pipe', 'inherit'] : 'inherit',
       });
       runningExec = child;
 
-      if (appServerMode && child.stdin && child.stdout) {
+      if (jsonStreamMode && child.stdin && child.stdout) {
         const containerRoot = `/sandbox/${projectName}`;
+        process.stdin.on('data', () => {
+          dirtySinceLastSync = true;
+        });
         process.stdin
           .pipe(createJsonRpcPathTransform(projectRoot, containerRoot, 'hostToContainer'))
           .pipe(child.stdin);
         child.stdout
-          .pipe(createJsonRpcPathTransform(projectRoot, containerRoot, 'containerToHost'))
+          .pipe(createJsonRpcPathTransform(projectRoot, containerRoot, 'containerToHost', syncSandboxToHost))
           .pipe(process.stdout);
       }
 
@@ -277,4 +379,45 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
     } catch {}
     await cleanup();
   }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function buildStreamingSshArgs(
+  execArgs: string[],
+  sshConfigContent: string,
+  sshConfigPath: string
+): string[] {
+  const hostMatch = sshConfigContent.match(/^\s*Host\s+(\S+)/m);
+  if (!hostMatch) {
+    throw new Error('Could not parse Host alias from openshell sandbox ssh-config');
+  }
+  const hostAlias = hostMatch[1];
+
+  const sep = execArgs.indexOf('--');
+  const header = sep >= 0 ? execArgs.slice(0, sep) : execArgs;
+  const cmdParts = sep >= 0 ? execArgs.slice(sep + 1) : [];
+
+  let workdir = '';
+  const envs: string[] = [];
+  for (let i = 0; i < header.length; i++) {
+    if (header[i] === '--workdir' && i + 1 < header.length) {
+      workdir = header[++i];
+    } else if (header[i] === '--env' && i + 1 < header.length) {
+      envs.push(header[++i]);
+    }
+  }
+
+  const statements: string[] = [];
+  if (workdir) statements.push(`cd ${shellQuote(workdir)}`);
+  for (const envPair of envs) {
+    statements.push(`export ${shellQuote(envPair)}`);
+  }
+  statements.push(`exec ${cmdParts.map(shellQuote).join(' ')}`);
+  const innerScript = statements.join(' && ');
+  const remoteCommand = `bash -lc ${shellQuote(innerScript)}`;
+
+  return ['-T', '-F', sshConfigPath, hostAlias, remoteCommand];
 }

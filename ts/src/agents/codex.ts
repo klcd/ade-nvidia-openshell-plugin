@@ -12,7 +12,7 @@ export class CodexAdapter implements AgentAdapter {
   public readonly providerName = 'codex';
 
   private authHome(): string {
-    if (process.env.OPENSHELL_BRIDGE_REQUIRED === '1') {
+    if (process.env.OPENSHELL_BRIDGE_REQUIRED === '1' || process.env.ORCA_STRUCTURED_SESSION === '1') {
       const dedicated = path.join(USER_HOME, '.local', 'share', 'orca-codex-auth');
       if (fs.existsSync(path.join(dedicated, 'auth.json'))) return dedicated;
     }
@@ -20,7 +20,13 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   public shouldBypassSandbox(args: string[], cwd: string): boolean {
-    if (process.env.OPENSHELL_BRIDGE_REQUIRED === '1' || process.env.ORCA_OPENSHELL_REQUIRED === '1') return false;
+    if (
+      process.env.OPENSHELL_BRIDGE_REQUIRED === '1' ||
+      process.env.ORCA_OPENSHELL_REQUIRED === '1' ||
+      process.env.ORCA_STRUCTURED_SESSION === '1'
+    ) {
+      return false;
+    }
     if (args.some(arg => ['--version', '-V', '--help', '-h'].includes(arg))) {
       return true;
     }
@@ -102,6 +108,7 @@ export class CodexAdapter implements AgentAdapter {
     args: string[],
     _credentials: Record<string, string>
   ): string[] {
+    const appServer = args.includes('app-server');
     const argsPrefix = [
       'sandbox', 'exec',
       '--name', sandboxName,
@@ -110,7 +117,13 @@ export class CodexAdapter implements AgentAdapter {
     // App-server is newline-delimited JSON-RPC over stdio; a PTY echoes input
     // and can corrupt the protocol stream. Interactive CLI sessions still need
     // a TTY for terminal control sequences.
-    if (!args.includes('app-server')) argsPrefix.push('--tty');
+    if (!appServer) argsPrefix.push('--tty');
+    else {
+      argsPrefix.push('--no-tty');
+      for (const key of ['ORCA_STRUCTURED_SESSION', 'ORCA_AGENT_SESSION_ID']) {
+        if (process.env[key]) argsPrefix.push('--env', `${key}=${process.env[key]}`);
+      }
+    }
     return [...argsPrefix, '--', 'codex', ...args];
   }
 

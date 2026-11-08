@@ -117,22 +117,35 @@ orca orchestration check --peek --json
 The shim also translates `--spec-file <path|->` by reading the file or stdin
 inside the sandbox. It never asks the host to read a sandbox-supplied path.
 
+## Structured Chat Mode (`surface: "chat"`) vs Terminal Mode (`surface: "terminal"`)
+
+Orca supports two launch surfaces:
+
+1. **Terminal Mode (`surface: "terminal"`)**:
+   Intercepted by the `local.openshell-bridge` `agent.launch.before` plugin hook (`claude`, `codex`, `antigravity`). Runs an interactive PTY via `openshell sandbox exec --tty`.
+2. **Structured Chat Mode (`surface: "chat"`)**:
+   Launched by Orca's structured session host using `settings.agentCmdOverrides` (`claude -> ~/.local/bin/claude-box`, `codex -> ~/.local/bin/codex-box`, configured automatically by `./scripts/install-orca-host.sh`) with `ORCA_STRUCTURED_SESSION=1` and `ORCA_AGENT_SESSION_ID=<id>`:
+   - **Fast-path Probe Bypass**: Orca's short-lived background model/command discovery probes (`--version`, `dontAsk`, `"disableAllHooks":true`) bypass sandbox creation so the Orca UI remains responsive.
+   - **Full-Duplex SSH Streaming**: Because `openshell sandbox exec` buffers `stdin` until EOF before calling the unary gRPC `ExecSandbox` RPC, persistent bidirectional JSON protocols (`claude --input-format stream-json --output-format stream-json` and `codex app-server`) stream over `ssh -T` using `openshell sandbox ssh-config <sandbox-name>`.
+   - **Host Plugin & Attachment Staging**: Host directories passed via `--add-dir`, `--plugin-dir`, or `--plugin-dir-no-mcp` (such as Orca's `native-chat-visuals` skill plugin and chat scratch folders) are staged into `/sandbox/.claude/orca-host-dirs/<slug>` and rewritten automatically.
+   - **Per-Turn Workspace & Transcript Sync**: At the end of every turn (`"type": "result"` or `"method": "turn/completed"`), `runner.ts` merges nonconflicting workspace edits back to the host and syncs Claude `.jsonl` transcripts (`~/.claude/projects/<project-slug>/*.jsonl`) with container-to-host path rewriting before flushing the completion frame to Orca.
+   - **Parent-PID Sandbox Watchdog**: A lightweight detached watchdog guarantees `openshell sandbox delete <name>` runs even if Orca's teardown supervisor delivers `SIGKILL`.
+   - *(Note: Antigravity in Chat Mode uses Orca's internal `agy_acp_server.par` runtime with `ignoreAgentCommandSetting: true`; use Terminal Mode for `agy-box` sandboxes.)*
+
 ## Policies and support
 
 `policies/orca-codex.json`, `policies/orca-claude.json`, and
-`policies/orca-antigravity.json` require hard Landlock and have no explicit
-network destinations. Any repository-specific policies in `<project>/.agents/policies/`
-are merged on top of the base Orca policy while preserving the hard Landlock
-requirement. Attached provider profiles allow only their listed model API hosts
-on port 443. There is no Orca runtime network rule; the coordinator talks to its
-broker through local FIFOs and OpenShell exec. Coordinator and worker egress
-policies are currently the same because the Orca launch hook does not identify
-worker role. Per-workspace write scopes can be configured with
+`policies/orca-antigravity.json` (plus `~/.orca/plugins/openshell-bridge/policies/orca-standard.yaml`)
+require hard Landlock and have no explicit network destinations. Any
+repository-specific policies in `<project>/.agents/policies/` are merged on top
+of the base Orca policy while preserving the hard Landlock requirement. Attached
+provider profiles allow only their listed model API hosts on port 443. There is
+no Orca runtime network rule; the coordinator talks to its broker through local
+FIFOs and OpenShell exec. Per-workspace write scopes can be configured with
 `ORCA_SANDBOX_WRITE_PATHS` on the host.
 
 OpenCode remains unsupported because this bridge has no OpenCode runner or
-image. Structured Chat agents and saved-session restores do not pass through
-Orca's terminal launch hook and are outside this integration.
+image.
 
 ## Verification
 

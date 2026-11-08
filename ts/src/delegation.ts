@@ -161,7 +161,14 @@ export class DelegationBroker {
     if (grant.depth >= grant.maxDepth || this.attempts >= grant.maxWorkers) return { code: 77, stdout: '', stderr: 'Worker or nesting limit reached\n' };
     this.attempts++;
     const launchedAt = Date.now();
-    const launchArgs = ['agent', 'launch', '--agent', agent, '--surface', 'terminal', '--worktree', grant.workspace];
+    const launchArgs = ['agent', 'launch', '--agent', agent];
+    const requestedSurface = process.env.ORCA_WORKER_SURFACE;
+    if (requestedSurface === 'chat' || requestedSurface === 'terminal') {
+      launchArgs.push('--surface', requestedSurface);
+    } else if (agent === 'antigravity' || agent === 'agy') {
+      launchArgs.push('--surface', 'terminal');
+    }
+    launchArgs.push('--worktree', grant.workspace);
     if (model) launchArgs.push('--model', model);
     if (effort) launchArgs.push('--effort', effort);
     launchArgs.push('--json');
@@ -169,6 +176,45 @@ export class DelegationBroker {
     if (launched.code) return launched;
     const handle = parseJson(launched)?.result?.launch?.outcome?.handle || parseJson(launched)?.result?.outcome?.handle;
     if (typeof handle !== 'string' || !handle) return { code: 1, stdout: launched.stdout, stderr: 'No terminal handle in agent launch receipt; manual recovery required\n' };
+
+    const isStructuredChat = handle.startsWith('structured-agent-session-');
+    const startArgs = ['orchestration', 'worker-start', '--spec', spec, '--terminal', handle, '--worktree', grant.workspace, '--from', this.terminal];
+    if (value(args, '--task-title')) startArgs.push('--task-title', value(args, '--task-title')!);
+    if (args.includes('--keep-open')) startArgs.push('--keep-open');
+    startArgs.push('--json');
+
+    if (isStructuredChat) {
+      writeGrant({ terminal: handle, workspace: grant.workspace, agents: grant.agents, maxWorkers: grant.maxWorkers, depth: grant.depth + 1, maxDepth: grant.maxDepth });
+      const started = orca(startArgs, this.cwd);
+      if (started.code !== 0) {
+        revokeGrant(handle);
+        const dispatchId = parseJson(started)?.result?.dispatchId;
+        if (typeof dispatchId === 'string') {
+          orca(['orchestration', 'worker-release', '--dispatch', dispatchId, '--json'], this.cwd);
+        }
+        const close = orca(['terminal', 'close', '--terminal', handle, '--json'], this.cwd);
+        started.stderr += `OpenShell chat worker startup failed; pre-created session ${handle} close result: ${close.code === 0 ? 'closed' : 'failed; inspect manually'}.\n`;
+        return started;
+      }
+      let marker = readLaunch(handle);
+      for (let i = 0; i < 30 && (!marker || marker.at < launchedAt); i++) {
+        execFileSync('sleep', ['1']);
+        marker = readLaunch(handle);
+      }
+      const coordinatorId = gatewaySandbox(this.sandbox);
+      const workerId = marker ? gatewaySandbox(marker.sandbox) : null;
+      if (!marker || marker.at < launchedAt || marker.workspace !== this.workspace || marker.sandbox === this.sandbox || !coordinatorId || !workerId || workerId === coordinatorId) {
+        revokeGrant(handle);
+        const dispatchId = parseJson(started)?.result?.dispatchId;
+        if (typeof dispatchId === 'string') {
+          orca(['orchestration', 'worker-release', '--dispatch', dispatchId, '--json'], this.cwd);
+        }
+        const close = orca(['terminal', 'close', '--terminal', handle, '--json'], this.cwd);
+        return { code: 1, stdout: started.stdout, stderr: `Worker chat session ${handle} lacks verified, distinct OpenShell sandbox; launch refused. Close result: ${close.code === 0 ? 'closed' : 'unknown; inspect manually'}\n` };
+      }
+      return started;
+    }
+
     let marker = readLaunch(handle);
     for (let i = 0; i < 60 && (!marker || marker.at < launchedAt); i++) {
       execFileSync('sleep', ['1']);
@@ -182,10 +228,6 @@ export class DelegationBroker {
     }
     writeGrant({ terminal: handle, workspace: grant.workspace, agents: grant.agents, maxWorkers: grant.maxWorkers, depth: grant.depth + 1, maxDepth: grant.maxDepth });
     orca(['terminal', 'wait', '--terminal', handle, '--for', 'tui-idle', '--timeout-ms', '15000', '--json'], this.cwd);
-    const startArgs = ['orchestration', 'worker-start', '--spec', spec, '--terminal', handle, '--worktree', grant.workspace, '--from', this.terminal];
-    if (value(args, '--task-title')) startArgs.push('--task-title', value(args, '--task-title')!);
-    if (args.includes('--keep-open')) startArgs.push('--keep-open');
-    startArgs.push('--json');
     const started = orca(startArgs, this.cwd);
     if (started.code !== 0) {
       revokeGrant(handle);

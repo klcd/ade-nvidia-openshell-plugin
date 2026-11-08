@@ -40,5 +40,17 @@ install -m 644 "$ROOT/policies/orca-claude.json" "$POLICY_DIR/claude.json"
 install -m 644 "$ROOT/policies/orca-antigravity.json" "$POLICY_DIR/antigravity.json"
 install -m 644 "$ROOT/policies/orca-antigravity.json" "$POLICY_DIR/agy.json"
 orca plugin validate "$ROOT/orca-plugin" --json
+if [[ -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/runtime-client.js" ]]; then
+  ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca -e '
+const { RuntimeClient } = require("/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/runtime-client.js");
+const binDir = process.argv[1];
+(async () => {
+  const client = new RuntimeClient();
+  for (const [agent, bin] of [["claude", "claude-box"], ["codex", "codex-box"], ["antigravity", "agy-box"]]) {
+    await client.call("settings.mutateAgentLaunch", { type: "command", agent, value: `${binDir}/${bin}` });
+  }
+})().catch(() => {});
+' "$BIN_DIR" || true
+fi
 echo "Bridge and Orca policies installed. Review and run:"
 echo "  orca plugin install '$ROOT/orca-plugin' --json"
