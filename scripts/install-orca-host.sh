@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export AG_SANDBOX_HOST_INTERNAL=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${ORCA_OPENSHELL_BRIDGE_BIN_DIR:-$HOME/.local/bin}"
@@ -39,6 +40,96 @@ install -m 644 "$ROOT/policies/orca-codex.json" "$POLICY_DIR/codex.json"
 install -m 644 "$ROOT/policies/orca-claude.json" "$POLICY_DIR/claude.json"
 install -m 644 "$ROOT/policies/orca-antigravity.json" "$POLICY_DIR/antigravity.json"
 install -m 644 "$ROOT/policies/orca-antigravity.json" "$POLICY_DIR/agy.json"
+
+# Install Antigravity Chat Mode OpenShell shell shims and localharness_external wrapper
+AG_SHIM_DIR="$HOME/.config/orca-openshell/ag-shim"
+mkdir -p "$AG_SHIM_DIR"
+
+cat >"$AG_SHIM_DIR/zsh" <<EOF
+#!/bin/sh
+if [ -n "\${ANTIGRAVITY_HARNESS_PATH:-}" ] && [ -z "\${AG_SANDBOX_HOST_INTERNAL:-}" ] && [ "\${1:-}" = "-c" ]; then
+  export AG_SANDBOX_HOST_INTERNAL=1
+  exec "$BIN_DIR/agent-box" agy-chat-exec "zsh" "\${2:-}"
+fi
+if [ -x /etc/profiles/per-user/\${USER:-cedric}/bin/zsh ]; then
+  exec /etc/profiles/per-user/\${USER:-cedric}/bin/zsh "\$@"
+elif [ -x /run/current-system/sw/bin/zsh ]; then
+  exec /run/current-system/sw/bin/zsh "\$@"
+else
+  exec /bin/zsh "\$@"
+fi
+EOF
+chmod 755 "$AG_SHIM_DIR/zsh"
+
+cat >"$AG_SHIM_DIR/bash" <<EOF
+#!/bin/sh
+if [ -n "\${ANTIGRAVITY_HARNESS_PATH:-}" ] && [ -z "\${AG_SANDBOX_HOST_INTERNAL:-}" ] && [ "\${1:-}" = "-c" ]; then
+  export AG_SANDBOX_HOST_INTERNAL=1
+  exec "$BIN_DIR/agent-box" agy-chat-exec "bash" "\${2:-}"
+fi
+if [ -x /run/current-system/sw/bin/bash ]; then
+  exec /run/current-system/sw/bin/bash "\$@"
+else
+  exec /bin/bash "\$@"
+fi
+EOF
+chmod 755 "$AG_SHIM_DIR/bash"
+
+install -m 755 "$AG_SHIM_DIR/zsh" "$BIN_DIR/zsh"
+install -m 755 "$AG_SHIM_DIR/bash" "$BIN_DIR/bash"
+
+ORCA_AGY_RUNTIME_ROOT="$HOME/Library/Application Support/orca/agent-runtimes/antigravity"
+if [ -d "$ORCA_AGY_RUNTIME_ROOT" ]; then
+  for rt_dir in "$ORCA_AGY_RUNTIME_ROOT"/*; do
+    [ -d "$rt_dir" ] || continue
+    harness_bin="$rt_dir/localharness_external"
+    real_bin="$rt_dir/localharness_external.real"
+    manifest="$rt_dir/.install-complete.json"
+    if [ -f "$harness_bin" ] && [ ! -f "$real_bin" ]; then
+      mv "$harness_bin" "$real_bin"
+    fi
+    if [ -f "$real_bin" ]; then
+      cat >"$harness_bin" <<EOF
+#!/bin/sh
+SELF_DIR="\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)"
+REAL_BIN="\$SELF_DIR/localharness_external.real"
+SHIM_DIR="\$HOME/.config/orca-openshell/ag-shim"
+
+unset BAO_TOKEN BAO_ADDR BEADS_DOLT_PASSWORD DOLT_PASSWORD SOPS_AGE_KEY_FILE
+unset SSH_AUTH_SOCK GITHUB_TOKEN GH_TOKEN OPENAI_API_KEY ANTHROPIC_API_KEY
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
+export AG_HOST_WORKDIR="\${PWD}"
+export AG_HARNESS_PID="\$\$"
+export SHELL="\$SHIM_DIR/zsh"
+export PATH="\$SHIM_DIR:\$PATH"
+
+SESSION_KEY="\${ORCA_AGENT_SESSION_ID:-ag-ppid-\$\$}"
+SAFE_KEY="\$(printf '%s' "\$SESSION_KEY" | tr -c 'a-zA-Z0-9_.-' '_')"
+UID_NUM="\$(id -u 2>/dev/null || echo 501)"
+SESSION_DIR="/tmp/orca-ag-openshell-\$UID_NUM/\$SAFE_KEY"
+AG_SANDBOX_HOST_INTERNAL=1 "$BIN_DIR/agent-box" agy-chat-daemon "\$SESSION_DIR" "\$PWD" "\$\$" >/dev/null 2>&1 &
+
+exec "\$REAL_BIN" "\$@"
+EOF
+      chmod 755 "$harness_bin"
+      if [ -f "$manifest" ]; then
+        python3 - "$manifest" "$harness_bin" <<'PY'
+import json, os, sys
+manifest_path, harness_path = sys.argv[1], sys.argv[2]
+data = json.load(open(manifest_path))
+size = os.lstat(harness_path).st_size
+for member in data.get("members", []):
+    if member.get("path") == "localharness_external":
+        member["bytes"] = size
+with open(manifest_path, "w") as f:
+    json.dump(data, f, separators=(",", ":"))
+PY
+      fi
+    fi
+  done
+fi
+
 orca plugin validate "$ROOT/orca-plugin" --json
 if [[ -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/runtime-client.js" ]]; then
   ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca -e '

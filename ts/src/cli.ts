@@ -5,6 +5,7 @@ import { ClaudeAdapter } from './agents/claude.js';
 import { CodexAdapter } from './agents/codex.js';
 import { AntigravityAdapter } from './agents/antigravity.js';
 import { runSandboxSession } from './runner.js';
+import { runAgyChatDaemon, runAgyChatExec } from './agy-chat-sandbox.js';
 
 function getAdapter(target: string): AgentAdapter {
   switch (target.toLowerCase()) {
@@ -32,6 +33,19 @@ async function main(): Promise<void> {
 
   if (binaryName.includes('agent-box')) {
     agentTarget = process.argv[2] || '';
+    if (agentTarget === 'agy-chat-daemon') {
+      const sessionDir = process.argv[3] || '';
+      const projectRoot = process.argv[4] || process.cwd();
+      const harnessPid = Number(process.argv[5] || '0');
+      const code = await runAgyChatDaemon(sessionDir, projectRoot, harnessPid);
+      process.exit(code);
+    }
+    if (agentTarget === 'agy-chat-exec') {
+      const shellName = process.argv[3] || 'zsh';
+      const commandLine = process.argv[4] || '';
+      const code = await runAgyChatExec(shellName, commandLine);
+      process.exit(code);
+    }
     if (!agentTarget || agentTarget.startsWith('-')) {
       console.log('Usage: agent-box <claude|codex|agy> [options...]');
       process.exit(0);
