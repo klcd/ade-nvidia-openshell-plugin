@@ -598,6 +598,168 @@ export function getAgySessionDir(sessionKey: string): string {
   return path.join('/tmp', `orca-ag-openshell-${uid}`, safeSessionKey);
 }
 
+export interface BlockedEgressInfo {
+  host: string;
+  port: number;
+  method: string;
+  path: string;
+  binary: string;
+}
+
+export function detectBlockedEgress(
+  commandLine: string,
+  exitCode: number,
+  stdoutText: string,
+  stderrText: string
+): BlockedEgressInfo | null {
+  const combined = `${stdoutText}\n${stderrText}`;
+
+  // 1. Check structured OpenShell L7 HTTP 403 policy denial payload
+  if (combined.includes('X-OpenShell-Policy:') || combined.includes('"error":"policy_denied"')) {
+    const jsonMatch = /\{"binary":[^\n]*?"rule_missing":\{[^\n]*?\}\}/.exec(combined);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]) as {
+          binary?: string;
+          host?: string;
+          method?: string;
+          path?: string;
+          port?: number;
+          rule_missing?: {
+            binary?: string;
+            host?: string;
+            method?: string;
+            path?: string;
+            port?: number;
+          };
+        };
+        const rm = parsed.rule_missing || parsed;
+        if (rm.host) {
+          return {
+            host: rm.host,
+            port: Number(rm.port || 443),
+            method: (rm.method || 'GET').toUpperCase(),
+            path: rm.path || '/**',
+            binary: rm.binary || '*',
+          };
+        }
+      } catch {}
+    }
+  }
+
+  // 2. Check non-zero exit code (or curl connection refusal) for commands targeting a URL
+  const isNetworkFailure =
+    exitCode !== 0 ||
+    /Failed to connect|Couldn't connect to server|Connection refused|Could not resolve host|X-OpenShell-Policy:/i.test(
+      combined
+    );
+  if (!isNetworkFailure) return null;
+
+  const urlMatch = /(https?):\/\/([a-zA-Z0-9.-]+)(?::(\d+))?(\/[^\s"']*)?/.exec(commandLine);
+  if (!urlMatch) return null;
+
+  if (!/\b(curl|wget|fetch|http|gh|npm|bun|pip|poetry|cargo|go|python3?|node)\b/.test(commandLine)) {
+    return null;
+  }
+
+  const scheme = urlMatch[1].toLowerCase();
+  const host = urlMatch[2];
+  const port = Number(urlMatch[3] || (scheme === 'http' ? 80 : 443));
+  const rawPath = urlMatch[4] || '/**';
+  const cleanPath = rawPath.split('?')[0] || '/**';
+  const methodMatch = /(?:-X|--request)\s+['"]?(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)['"]?/i.exec(
+    commandLine
+  );
+  const method = methodMatch
+    ? methodMatch[1].toUpperCase()
+    : /\s(?:-d|--data|--data-raw|--data-binary)\s/.test(commandLine)
+      ? 'POST'
+      : 'GET';
+
+  return {
+    host,
+    port,
+    method,
+    path: cleanPath,
+    binary: '*',
+  };
+}
+
+function promptUserForL7Approval(
+  info: BlockedEgressInfo,
+  sandboxName: string
+): 'session' | 'workspace' | 'global' | 'deny' {
+  if (process.env.ORCA_OPENSHELL_AUTO_APPROVE_SCOPE) {
+    const s = process.env.ORCA_OPENSHELL_AUTO_APPROVE_SCOPE;
+    if (s === 'session' || s === 'workspace' || s === 'global' || s === 'deny') return s;
+  }
+  if (process.platform !== 'darwin' || process.env.ORCA_OPENSHELL_DISABLE_POPUP === '1') {
+    return 'deny';
+  }
+
+  const optSession = '1. Allow for this session only (Live hot-reload)';
+  const optWorkspace = '2. Allow and save for this project (.agents/policies/l7-custom.json)';
+  const optGlobal = '3. Allow in general for all projects (Global policy)';
+  const optDeny = '4. Keep blocked (Deny)';
+
+  const promptText =
+    `OpenShell blocked outbound network egress in sandbox ${sandboxName}:\\n\\n` +
+    `  ${info.method} https://${info.host}:${info.port}${info.path}\\n\\n` +
+    `Select how to handle this L7 rule:`;
+
+  const script = [
+    `set opts to {${JSON.stringify(optSession)}, ${JSON.stringify(optWorkspace)}, ${JSON.stringify(optGlobal)}, ${JSON.stringify(optDeny)}}`,
+    `set choice to choose from list opts with title "OpenShell L7 Network Policy" with prompt "${promptText}" default items {${JSON.stringify(optSession)}} OK button name "Apply Rule" cancel button name "Keep Blocked"`,
+    `if choice is false then return "deny"`,
+    `return item 1 of choice`,
+  ].join('\n');
+
+  try {
+    const out = execFileSync('osascript', ['-e', script], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 60000,
+    }).trim();
+    if (out.startsWith('1.')) return 'session';
+    if (out.startsWith('2.')) return 'workspace';
+    if (out.startsWith('3.')) return 'global';
+    return 'deny';
+  } catch {
+    return 'deny';
+  }
+}
+
+async function runRemoteSshCaptured(
+  state: AgyChatSandboxState,
+  remoteScript: string
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const child = spawn(
+      'ssh',
+      ['-T', '-S', state.sshControlPath, '-F', state.sshConfigPath, state.sshHost, remoteScript],
+      { stdio: ['inherit', 'pipe', 'pipe'] }
+    );
+    child.stdout.on('data', (chunk: Buffer) => stdoutChunks.push(Buffer.from(chunk)));
+    child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(Buffer.from(chunk)));
+    child.on('close', (code, signal) => {
+      resolve({
+        exitCode: code ?? (signal ? 128 + (os.constants.signals[signal] ?? 1) : 1),
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+      });
+    });
+    child.on('error', () =>
+      resolve({
+        exitCode: 1,
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+      })
+    );
+  });
+}
+
 export async function runAgyChatExec(shellName: string, commandLine: string): Promise<number> {
   process.env.AG_SANDBOX_HOST_INTERNAL = '1';
   delete process.env.ANTIGRAVITY_HARNESS_PATH;
@@ -637,33 +799,48 @@ export async function runAgyChatExec(shellName: string, commandLine: string): Pr
       : `bash -c ${shellQuote(translatedCommand)}`,
   ].join('\n');
 
-  const exitCode = await new Promise<number>((resolve) => {
-    const child = spawn(
-      'ssh',
-      ['-T', '-S', state.sshControlPath, '-F', state.sshConfigPath, state.sshHost, remoteScript],
-      { stdio: 'inherit' }
-    );
-    child.on('close', (code, signal) => {
-      resolve(code ?? (signal ? 128 + (os.constants.signals[signal] ?? 1) : 1));
-    });
-    child.on('error', () => resolve(1));
-  });
+  let result = await runRemoteSshCaptured(state, remoteScript);
+  const blocked = detectBlockedEgress(commandLine, result.exitCode, result.stdout, result.stderr);
 
-  if (exitCode !== 0) {
-    const urlMatch = /https?:\/\/([a-zA-Z0-9.-]+)(?::(\d+))?(\/[^\s"']*)?/.exec(commandLine);
-    if (urlMatch && /\b(curl|wget|fetch|http|gh|npm|bun|pip|poetry|cargo|go)\b/.test(commandLine)) {
-      const host = urlMatch[1];
-      const port = urlMatch[2] || '443';
-      const urlPath = urlMatch[3] || '/**';
-      const methodMatch = /(?:-X|--request)\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)/i.exec(commandLine);
-      const method = methodMatch ? methodMatch[1].toUpperCase() : 'GET';
+  if (blocked) {
+    const decision = promptUserForL7Approval(blocked, state.sandboxName);
+    if (decision !== 'deny') {
+      await runAgyPolicyAdd([
+        '--scope', decision,
+        '--host', blocked.host,
+        '--port', String(blocked.port),
+        '--method', blocked.method,
+        '--path', blocked.path,
+        '--binary', blocked.binary || '*',
+        '--sandbox', state.sandboxName,
+      ]);
+
+      // Wait for OpenShell supervisor settings poll (~1s interval) and automatically retry
+      for (let attempt = 0; attempt < 5; attempt++) {
+        execFileSync('sleep', ['0.7']);
+        result = await runRemoteSshCaptured(state, remoteScript);
+        const stillBlocked = detectBlockedEgress(
+          commandLine,
+          result.exitCode,
+          result.stdout,
+          result.stderr
+        );
+        if (!stillBlocked) break;
+      }
+    } else {
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
       process.stderr.write(
-        `\n[OpenShell Egress Blocked] Target: ${method} https://${host}:${port}${urlPath} (sandbox: ${state.sandboxName})\n` +
-        `[OpenShell Hint] Ask the user via your interactive question tool (ask_question / AskUserQuestion) whether to allow this L7 rule for: (1) Session only, (2) Project, or (3) Global, then run:\n` +
-        `  openshell-l7-allow --scope <session|workspace|global> --host ${host} --port ${port} --method ${method} --path "${urlPath}"\n`
+        `\n[OpenShell Egress Denied by User] Target: ${blocked.method} https://${blocked.host}:${blocked.port}${blocked.path} (sandbox: ${state.sandboxName})\n`
       );
+      syncSandboxDeltaToHost(state, sessionDir);
+      return result.exitCode !== 0 ? result.exitCode : 1;
     }
   }
+
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  const exitCode = result.exitCode;
 
   syncSandboxDeltaToHost(state, sessionDir);
 

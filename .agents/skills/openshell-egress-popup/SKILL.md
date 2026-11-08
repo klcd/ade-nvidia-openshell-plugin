@@ -1,22 +1,17 @@
 ---
 name: openshell-egress-popup
-description: Prompt the user with an interactive in-chat popup whenever OpenShell blocks a network egress request (e.g. curl/fetch/gh/npm connection refused or 403) and dynamically apply the approved L7 HTTP policy rule.
+description: Handle OpenShell L7 network egress blocks in 2 LLM turns by letting agent-box intercept the blocked request, display the approval popup, hot-reload the sandbox policy, and retry inside the same run_command call.
 ---
 
-# OpenShell Dynamic L7 Egress Popup Skill
+# OpenShell Dynamic L7 Egress Popup Skill (2-LLM-Request Flow)
 
-Whenever a shell command inside the OpenShell sandbox fails due to network egress blocking (for example `curl: (7) Failed to connect`, `403 Forbidden` from the OpenShell supervisor proxy, or `[OpenShell Egress Blocked]` in stderr):
+When running network commands (`curl`, `wget`, `gh`, `npm`, `bun`, etc.) inside the OpenShell sandbox:
 
-1. **Prompt via In-Chat Popup**:
-   Immediately call the interactive question tool (`ask_question` in Antigravity, `AskUserQuestion` in Claude Code, or `request_user_input` in Codex) to show a clean popup modal in the chat with these choices:
-   - `(Recommended) Allow for this session only (live hot-reload via openshell policy update)`
-   - `Allow and save for this project (.agents/policies/l7-custom.json + live hot-reload)`
-   - `Allow in general for all projects (~/.agents/orca-openshell-policies + live hot-reload)`
-   - `Keep blocked`
-
-2. **Apply the Rule Dynamically**:
-   Based on the user's popup selection (`session`, `workspace`, or `global`), run:
-   ```bash
-   openshell-l7-allow --scope <session|workspace|global> --host <domain> --port <port> --method <GET|POST|...> --path "<path-or-/**>"
-   ```
-   and then re-run the blocked command to verify it succeeds.
+1. **Single-Turn Interception & Retry (2 LLM Requests Total)**:
+   - Always set `WaitMsBeforeAsync: 10000` on `run_command` when executing network requests.
+   - If OpenShell blocks the outbound request (DNS/TCP refusal or L7 HTTP `403 Forbidden`), `agent-box` (`runAgyChatExec`) **automatically intercepts the block before returning to the LLM**, displays an interactive popup modal (`Session only`, `Project`, `Global`, or `Keep Blocked`), hot-reloads the OpenShell sandbox policy via `openshell policy update`, and **automatically retries the command inside the exact same `run_command` invocation**.
+   - As a result, the entire flow uses **only 2 LLM requests**:
+     1. **Request 1**: LLM invokes `run_command("curl ...")` (user approves in popup $\rightarrow$ policy reloads $\rightarrow$ command retries and returns `200 OK`).
+     2. **Request 2**: LLM receives the `200 OK` output and summarizes the result for the user.
+2. **If the User Clicks "Keep Blocked"**:
+   - `run_command` will output `[OpenShell Egress Denied by User]`. Do **not** prompt again or call `openshell-l7-allow`; simply report to the user that the request remained blocked as chosen.
