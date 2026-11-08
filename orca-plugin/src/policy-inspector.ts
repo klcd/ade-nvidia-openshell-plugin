@@ -1244,6 +1244,10 @@ export function addL7Policy(
   const rawPath = String(req.path || '/**').trim()
   const urlPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`
   const binary = String(req.binary || '*').trim() || '*'
+  const effectiveBinaries =
+    binary === '*'
+      ? ['/usr/bin/curl', '/usr/bin/git', '/usr/local/bin/node', '/usr/bin/python3', '/usr/bin/gh']
+      : [binary]
   const ruleName =
     String(req.ruleName || `${host.replace(/[^a-zA-Z0-9]+/g, '_')}_l7`)
       .trim()
@@ -1280,16 +1284,16 @@ export function addL7Policy(
 
     const existingPol = doc.network_policies[ruleName] || {
       name: ruleName,
-      ...(binary !== '*' ? { binaries: [{ path: binary }] } : {}),
+      binaries: effectiveBinaries.map(p => ({ path: p })),
       endpoints: [],
     }
-    if (binary !== '*') {
-      const bins: Array<{ path: string }> = Array.isArray(existingPol.binaries) ? existingPol.binaries : []
-      if (!bins.some(b => b?.path === binary)) {
-        bins.push({ path: binary })
+    const bins: Array<{ path: string }> = Array.isArray(existingPol.binaries) ? existingPol.binaries : []
+    for (const b of effectiveBinaries) {
+      if (!bins.some(item => item?.path === b)) {
+        bins.push({ path: b })
       }
-      existingPol.binaries = bins
     }
+    existingPol.binaries = bins
 
     const endpoints: any[] = Array.isArray(existingPol.endpoints) ? existingPol.endpoints : []
     let ep = endpoints.find(e => e?.host === host && Number(e?.port || 443) === port)
@@ -1341,6 +1345,7 @@ export function addL7Policy(
     }
   }
 
+  const binFlags = effectiveBinaries.flatMap(b => ['--binary', b])
   const liveErrors: string[] = []
   for (const sbName of targetSandboxes) {
     const step1Args = [
@@ -1349,7 +1354,7 @@ export function addL7Policy(
       sbName,
       '--rule-name',
       ruleName,
-      ...(binary !== '*' ? ['--binary', binary] : []),
+      ...binFlags,
       '--add-endpoint',
       `${host}:${port}:read-write:rest:enforce`,
     ]
@@ -1359,7 +1364,7 @@ export function addL7Policy(
       sbName,
       '--rule-name',
       ruleName,
-      ...(binary !== '*' ? ['--binary', binary] : ['--any-binary']),
+      ...binFlags,
       action === 'allow' ? '--add-allow' : '--add-deny',
       `${host}:${port}:${method}:${urlPath}`,
     ]

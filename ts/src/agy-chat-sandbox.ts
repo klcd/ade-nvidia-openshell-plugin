@@ -739,6 +739,10 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
 
   const normalizedPath = urlPath.startsWith('/') ? urlPath : `/${urlPath}`;
   const ruleName = `${host.replace(/[^a-zA-Z0-9]+/g, '_')}_l7`;
+  const effectiveBinaries =
+    binary === '*'
+      ? ['/usr/bin/curl', '/usr/bin/git', '/usr/local/bin/node', '/usr/bin/python3', '/usr/bin/gh']
+      : [binary];
   const projectRoot = resolveAgyProjectRoot(process.cwd(), process.ppid);
 
   if (scope === 'workspace' || scope === 'global') {
@@ -755,9 +759,15 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
     doc.network_policies ??= {};
     const existingPol = doc.network_policies[ruleName] || {
       name: ruleName,
-      ...(binary !== '*' ? { binaries: [{ path: binary }] } : {}),
+      binaries: effectiveBinaries.map(p => ({ path: p })),
       endpoints: [],
     };
+    const bins: Array<{ path: string }> = Array.isArray(existingPol.binaries) ? existingPol.binaries : [];
+    for (const b of effectiveBinaries) {
+      if (!bins.some(item => item?.path === b)) bins.push({ path: b });
+    }
+    existingPol.binaries = bins;
+
     const endpoints: any[] = Array.isArray(existingPol.endpoints) ? existingPol.endpoints : [];
     let ep = endpoints.find(e => e?.host === host && Number(e?.port || 443) === port);
     if (!ep) {
@@ -797,6 +807,7 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
     } catch {}
   }
 
+  const binFlags = effectiveBinaries.flatMap(b => ['--binary', b]);
   for (const sb of targetSandboxes) {
     try {
       execFileSync(
@@ -804,7 +815,7 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
         [
           'policy', 'update', sb,
           '--rule-name', ruleName,
-          ...(binary !== '*' ? ['--binary', binary] : []),
+          ...binFlags,
           '--add-endpoint', `${host}:${port}:read-write:rest:enforce`,
         ],
         { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }
@@ -814,7 +825,7 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
         [
           'policy', 'update', sb,
           '--rule-name', ruleName,
-          ...(binary !== '*' ? ['--binary', binary] : ['--any-binary']),
+          ...binFlags,
           '--add-allow', `${host}:${port}:${method}:${normalizedPath}`,
         ],
         { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }
