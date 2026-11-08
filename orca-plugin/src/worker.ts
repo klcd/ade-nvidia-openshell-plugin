@@ -1,8 +1,9 @@
-// Orca invokes this hook for terminal agent launches, including worker-start.
+// Orca invokes this worker for terminal agent launches, the OpenShell Policies panel, and CLI policy inspection commands.
 import type { OrcaWorkerApi } from 'orca/worker'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { buildPolicyReport, evaluateCommandPolicy } from './policy-inspector.ts'
 
 const wrappers: Record<string, string> = {
   codex: 'codex-box',
@@ -38,8 +39,70 @@ export function bridgeCommand(agent: string, command: string, binDir: string): s
   return `${match[1]}${shellQuote(executable)}${command.slice(match[0].length)}`
 }
 
+/** Format a concise text summary of allowed policies and coupled CLI commands for the command palette. */
+export function formatCliPolicySummary(workspacePath?: string): string {
+  const report = buildPolicyReport({ workspacePath })
+  const lines: string[] = [
+    `=== OpenShell Policy & CLI Command Report (${report.selectedWorkspace.name}) ===`,
+    `Active Sandboxes: ${report.activeSandboxes.length > 0 ? report.activeSandboxes.map(s => `${s.name} (${s.phase})`).join(', ') : 'none'}`,
+    '',
+    '1. Agent Launch Policies & Coupled CLI Commands:',
+  ]
+
+  for (const agent of report.agents) {
+    lines.push(`  • ${agent.displayName} (${agent.agent}) — Landlock: ${agent.landlockMode}, Profile: ${agent.providerProfile}`)
+    for (const s of agent.surfaces) {
+      lines.push(`      [${s.surface}] ${s.cliExample}`)
+    }
+    lines.push(`      Allowed Binaries: ${agent.allowedBinaries.join(', ')}`)
+    lines.push(`      Allowed Egress:   ${agent.endpoints.map(e => `${e.host}:${e.port} (${e.access})`).join(', ')}`)
+  }
+
+  lines.push('', '2. Canonical CLI Command Permission Groups (DENY > ASK > ALLOW):')
+  for (const group of report.permissionGroups) {
+    const allows = group.rules.filter(r => r.action === 'allow').map(r => r.cliCommand)
+    const denies = group.rules.filter(r => r.action === 'deny').map(r => r.cliCommand)
+    lines.push(`  • [${group.scope}] ${group.name} (${group.sourceFile}) — ${group.description}`)
+    if (allows.length > 0) lines.push(`      ALLOW (${allows.length}): ${allows.join(' | ')}`)
+    if (denies.length > 0) lines.push(`      DENY  (${denies.length}): ${denies.join(' | ')}`)
+  }
+
+  lines.push('', '3. In-Sandbox Orchestration Delegation CLI Commands:')
+  for (const cmd of report.delegation.allowedCliCommands) {
+    lines.push(`  • ${cmd.command}`)
+  }
+
+  return lines.join('\n')
+}
+
 export default function activate(orca: OrcaWorkerApi): void {
+  let lastWorkspacePath: string | undefined
+
+  const refreshStatusBar = () => {
+    if (!orca.host?.call) return
+    try {
+      const report = buildPolicyReport({ workspacePath: lastWorkspacePath })
+      const activeCount = report.activeSandboxes.length
+      const allowCount = report.allCliRules.filter(r => r.action === 'allow').length
+      const text = activeCount > 0
+        ? `OpenShell: ${activeCount} sandbox${activeCount === 1 ? '' : 'es'} (${allowCount} CLI rules)`
+        : `OpenShell: Enforced (${allowCount} CLI rules)`
+      void orca.host.call('statusBar.update', {
+        id: 'openshell-status',
+        text,
+        icon: 'layers',
+        tone: activeCount > 0 ? 'accent' : 'success',
+        tooltip: `OpenShell Landlock & Network Enforced • ${activeCount} active sandbox(es) • ${allowCount} allowed CLI command patterns`,
+        visible: true,
+      }).catch(() => {})
+    } catch {}
+  }
+
   orca.hooks.on('agent.launch.before', (event, next) => {
+    if (event.workspaceId && event.workspaceId.includes('::/')) {
+      const wsPath = event.workspaceId.split('::')[1]
+      if (wsPath) lastWorkspacePath = wsPath
+    }
     if (!(event.agent in wrappers)) return next()
     try {
       const binDir = process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR || path.join(os.homedir(), '.local', 'bin')
@@ -54,6 +117,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       if (!fs.existsSync(policyFile)) return { deny: `OpenShell policy is missing: ${policyFile}` }
       const safeEnv = Object.fromEntries(Object.entries(event.env).filter(([key]) => !key.startsWith('OPENSHELL_BRIDGE_')))
       orca.log(`OpenShell bridge selected for ${event.agent} in ${event.workspaceId ?? 'unknown workspace'}`)
+      setTimeout(refreshStatusBar, 1500)
       return next({ ...event, command, env: {
         ...safeEnv,
         OPENSHELL_BRIDGE_REQUIRED: '1',
@@ -67,4 +131,26 @@ export default function activate(orca: OrcaWorkerApi): void {
       return { deny: String(error) }
     }
   })
+
+  orca.panels?.handle('getPolicyReport', (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as { workspacePath?: string }
+    const wsPath = req.workspacePath || lastWorkspacePath
+    if (req.workspacePath) lastWorkspacePath = req.workspacePath
+    const report = buildPolicyReport({ workspacePath: wsPath })
+    refreshStatusBar()
+    return report
+  })
+
+  orca.panels?.handle('evaluateCommand', (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as { command?: string; workspacePath?: string }
+    const report = buildPolicyReport({ workspacePath: req.workspacePath || lastWorkspacePath })
+    return evaluateCommandPolicy(String(req.command || ''), report)
+  })
+
+  orca.commands?.register('openshell.inspectPolicies', () => {
+    refreshStatusBar()
+    return formatCliPolicySummary(lastWorkspacePath)
+  })
+
+  refreshStatusBar()
 }

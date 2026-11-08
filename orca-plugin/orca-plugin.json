@@ -2,8 +2,8 @@
   "manifestVersion": 2,
   "id": "openshell-bridge",
   "name": "OpenShell Bridge",
-  "version": "0.2.0",
-  "description": "Route Orca terminal agent launches through OpenShell and bind restricted orchestration delegation to their Orca identities.",
+  "version": "0.3.0",
+  "description": "Route Orca agent launches through OpenShell sandboxes, inspect allowed Landlock/network/CLI command policies, and bind restricted orchestration delegation.",
   "engines": {
     "orca": ">=1.4.248"
   },
@@ -13,6 +13,30 @@
   "contributes": {
     "hooks": [
       { "event": "agent.launch.before", "onError": "deny" }
+    ],
+    "panels": [
+      {
+        "id": "policies",
+        "title": "OpenShell Policies",
+        "icon": "layers",
+        "entry": "panel/index.html"
+      }
+    ],
+    "commands": [
+      {
+        "id": "openshell.inspectPolicies",
+        "title": "OpenShell: Inspect Allowed Policies & CLI Commands"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "openshell-status",
+        "text": "OpenShell: Enforced",
+        "icon": "layers",
+        "tone": "success",
+        "tooltip": "OpenShell Sandbox & CLI Command Policies (click to inspect)",
+        "command": "openshell.inspectPolicies"
+      }
     ]
   },
   "capabilities": []

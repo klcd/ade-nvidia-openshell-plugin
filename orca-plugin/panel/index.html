@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenShell Policies &amp; CLI Commands</title>
+<style>
+  :root {
+    --bg: var(--orca-background, #0d1117);
+    --fg: var(--orca-foreground, #e6edf3);
+    --muted: var(--orca-muted, #161b22);
+    --muted-fg: var(--orca-muted-foreground, #8b949e);
+    --border: var(--orca-border, #30363d);
+    --input: var(--orca-input, #21262d);
+    --primary: var(--orca-primary, #2f81f7);
+    --primary-fg: var(--orca-primary-foreground, #ffffff);
+    --success: #2ea043;
+    --success-bg: rgba(46, 160, 67, 0.14);
+    --warn: #d29922;
+    --warn-bg: rgba(210, 153, 34, 0.15);
+    --danger: var(--orca-destructive, #f85149);
+    --danger-bg: rgba(248, 81, 73, 0.14);
+    --radius: var(--orca-radius, 8px);
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 12.5px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    max-width: 100%;
+  }
+  .header {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    background: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .title {
+    font-weight: 600;
+    font-size: 13.5px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .controls {
+    display: flex;
+    gap: 6px;
+    width: 100%;
+  }
+  select, input[type="text"] {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font: inherit;
+    outline: none;
+  }
+  select { flex: 1; min-width: 0; }
+  input[type="text"] { width: 100%; }
+  select:focus, input[type="text"]:focus {
+    border-color: var(--primary);
+  }
+  button {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 9px;
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover {
+    background: var(--input);
+  }
+  button.primary {
+    background: var(--primary);
+    color: var(--primary-fg);
+    border-color: var(--primary);
+    font-weight: 500;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+    overflow-x: auto;
+  }
+  .tab {
+    padding: 5px 9px;
+    border-radius: 6px;
+    font-size: 12px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted-fg);
+  }
+  .tab.active {
+    background: var(--muted);
+    color: var(--fg);
+    border-color: var(--border);
+    font-weight: 600;
+  }
+  .card {
+    background: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .card-title {
+    font-weight: 600;
+    font-size: 12.5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .sub {
+    color: var(--muted-fg);
+    font-size: 11.5px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 6px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    border: 1px solid transparent;
+  }
+  .badge.allow, .badge.pass {
+    color: var(--success);
+    background: var(--success-bg);
+    border-color: rgba(46, 160, 67, 0.35);
+  }
+  .badge.ask, .badge.warn {
+    color: var(--warn);
+    background: var(--warn-bg);
+    border-color: rgba(210, 153, 34, 0.35);
+  }
+  .badge.deny, .badge.block {
+    color: var(--danger);
+    background: var(--danger-bg);
+    border-color: rgba(248, 81, 73, 0.35);
+  }
+  .badge.neutral {
+    color: var(--muted-fg);
+    background: var(--bg);
+    border-color: var(--border);
+  }
+  .mono {
+    font-family: var(--mono);
+    font-size: 11.5px;
+  }
+  .cmd-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .cmd-left {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+  .cmd-code {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    word-break: break-all;
+    color: var(--fg);
+  }
+  .cmd-meta {
+    font-size: 11px;
+    color: var(--muted-fg);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .chip {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .tester-box {
+    display: flex;
+    gap: 6px;
+  }
+  .eval-result {
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 6px;
+  }
+  .stat-box {
+    padding: 7px 9px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .copy-btn {
+    padding: 2px 6px;
+    font-size: 10.5px;
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-top">
+        <div class="title">
+          <span>OpenShell Policy &amp; CLI Inspector</span>
+          <span id="sandboxBadge" class="badge neutral">Loading...</span>
+        </div>
+        <button id="refreshBtn" title="Reload policies and active sandboxes">Refresh</button>
+      </div>
+      <div class="controls">
+        <select id="workspaceSelect" title="Select Workspace"></select>
+        <select id="agentFilter" title="Filter by Agent">
+          <option value="all">All Agents (claude, codex, agy)</option>
+          <option value="claude">Claude Code (claude-box)</option>
+          <option value="codex">OpenAI Codex (codex-box)</option>
+          <option value="antigravity">Google Antigravity (agy-box)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Interactive CLI Command Policy Tester -->
+    <div class="card">
+      <div class="card-title">
+        <span>Test CLI Command Policy Compatibility</span>
+        <span class="sub">DENY &gt; ASK &gt; ALLOW + Landlock + Network</span>
+      </div>
+      <div class="tester-box">
+        <input id="cmdInput" type="text" class="mono" placeholder="e.g. git status, docker ps, sudo rm -rf /, orca orchestration worker-start..." />
+        <button id="testBtn" class="primary">Check</button>
+      </div>
+      <div class="chips" id="sampleCmds">
+        <button class="copy-btn sample-cmd" data-cmd="git status -s">git status -s</button>
+        <button class="copy-btn sample-cmd" data-cmd="docker ps --format '{{.Names}}'">docker ps</button>
+        <button class="copy-btn sample-cmd" data-cmd="kubectl get pods -A">kubectl get pods</button>
+        <button class="copy-btn sample-cmd" data-cmd="orca orchestration worker-start --agent claude --spec 'Run tests' --worktree current --json">orca worker-start</button>
+        <button class="copy-btn sample-cmd" data-cmd="sudo rm -rf /">sudo rm -rf /</button>
+      </div>
+      <div id="evalOutput" style="display:none;" class="eval-result"></div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="cli">CLI Commands (<span id="cliCount">0</span>)</button>
+      <button class="tab" data-tab="sandbox">Agent Sandboxes &amp; Egress</button>
+      <button class="tab" data-tab="delegation">Orchestration CLI</button>
+    </div>
+
+    <div id="tabContent"></div>
+  </div>
+
+  <script>
+    let currentReport = null;
+    let activeTab = 'cli';
+    let searchFilter = '';
+    let actionFilter = 'all';
+
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    async function copyText(text, btn) {
+      try {
+        await navigator.clipboard.writeText(text);
+        if (btn) {
+          const prev = btn.textContent;
+          btn.textContent = 'Copied';
+          setTimeout(() => { btn.textContent = prev; }, 1000);
+        }
+      } catch {}
+    }
+
+    async function loadReport(workspacePath) {
+      try {
+        const res = await window.orca.plugin.request('getPolicyReport', workspacePath ? { workspacePath } : {});
+        currentReport = res;
+        renderHeader();
+        renderActiveTab();
+        const cmd = document.getElementById('cmdInput').value.trim();
+        if (cmd) await runCommandCheck(cmd);
+      } catch (err) {
+        document.getElementById('tabContent').innerHTML =
+          `<div class="card"><span class="badge deny">Error</span><div class="mono">${escapeHtml(err?.message || err)}</div></div>`;
+      }
+    }
+
+    function renderHeader() {
+      if (!currentReport) return;
+      const sbCount = currentReport.activeSandboxes.length;
+      const badge = document.getElementById('sandboxBadge');
+      badge.className = 'badge ' + (sbCount > 0 ? 'allow' : 'neutral');
+      badge.textContent = sbCount > 0
+        ? `${sbCount} Active Sandbox${sbCount === 1 ? '' : 'es'}`
+        : 'Landlock Enforced';
+
+      const wsSelect = document.getElementById('workspaceSelect');
+      wsSelect.innerHTML = currentReport.workspaces.map(w => {
+        const selected = w.path === currentReport.selectedWorkspace.path ? 'selected' : '';
+        const branch = w.branch ? ` (${w.branch})` : '';
+        return `<option value="${escapeHtml(w.path)}" ${selected}>${escapeHtml(w.name)}${escapeHtml(branch)}</option>`;
+      }).join('');
+
+      document.getElementById('cliCount').textContent = String(currentReport.allCliRules.length);
+    }
+
+    async function runCommandCheck(command) {
+      if (!command || !currentReport) return;
+      const box = document.getElementById('evalOutput');
+      try {
+        const res = await window.orca.plugin.request('evaluateCommand', {
+          command,
+          workspacePath: currentReport.selectedWorkspace.path,
+        });
+        box.style.display = 'flex';
+        const badgeLabel = res.verdict.toUpperCase();
+        const rulesHtml = (res.matchedRules || []).map(r =>
+          `<div class="cmd-meta"><span class="badge ${escapeHtml(r.action)}">${escapeHtml(r.action.toUpperCase())}</span> <span class="mono">${escapeHtml(r.cliCommand)}</span> <span>(${escapeHtml(r.scope)}: ${escapeHtml(r.sourceFile)})</span></div>`
+        ).join('');
+        const checksHtml = (res.sandboxChecks || []).map(c =>
+          `<div class="cmd-meta"><span class="badge ${escapeHtml(c.status)}">${escapeHtml(c.status.toUpperCase())}</span> <strong>${escapeHtml(c.layer)}:</strong> <span>${escapeHtml(c.detail)}</span></div>`
+        ).join('');
+        box.innerHTML = `
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span class="badge ${escapeHtml(res.verdict)}">${escapeHtml(badgeLabel)}</span>
+            <span class="mono" style="font-weight:600;">${escapeHtml(res.command)}</span>
+          </div>
+          <div class="sub">${escapeHtml(res.summary)}</div>
+          ${rulesHtml}
+          ${checksHtml}
+        `;
+      } catch (err) {
+        box.style.display = 'flex';
+        box.innerHTML = `<span class="badge deny">Error</span><div>${escapeHtml(err?.message || err)}</div>`;
+      }
+    }
+
+    function renderCliTab() {
+      const ns = currentReport.nativeSync;
+      const selectedAgent = document.getElementById('agentFilter').value;
+
+      const groupsHtml = currentReport.permissionGroups.map(group => {
+        const filteredRules = group.rules.filter(r => {
+          if (selectedAgent !== 'all' && !r.compatibleAgents.includes(selectedAgent)) return false;
+          if (actionFilter !== 'all' && r.action !== actionFilter) return false;
+          if (!searchFilter) return true;
+          const q = searchFilter.toLowerCase();
+          return r.cliCommand.toLowerCase().includes(q) ||
+                 r.raw.toLowerCase().includes(q) ||
+                 r.groupName.toLowerCase().includes(q);
+        });
+        if (filteredRules.length === 0) return '';
+
+        const rows = filteredRules.map(r => `
+          <div class="cmd-row">
+            <div class="cmd-left">
+              <div class="cmd-code">${escapeHtml(r.cliCommand)}</div>
+              <div class="cmd-meta">
+                <span>Rule: <code class="mono">${escapeHtml(r.raw)}</code></span>
+                <span>• Binary: <code class="mono">${escapeHtml(r.baseBinary)}</code></span>
+                <span>• Agents: ${escapeHtml(r.compatibleAgents.join(', '))}</span>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="badge ${escapeHtml(r.action)}">${escapeHtml(r.action.toUpperCase())}</span>
+              <button class="copy-btn" data-copy="${escapeHtml(r.cliCommand.replace(/\s*\[args\.\.\.\]/, ''))}">Copy</button>
+            </div>
+          </div>
+        `).join('');
+
+        return `
+          <div class="card">
+            <div class="card-title">
+              <span>${escapeHtml(group.name)} <span class="sub">(${escapeHtml(group.sourceFile)})</span></span>
+              <div style="display:flex;gap:4px;">
+                <span class="badge neutral">${escapeHtml(group.scope)}</span>
+                ${group.allowCount ? `<span class="badge allow">${group.allowCount} allow</span>` : ''}
+                ${group.denyCount ? `<span class="badge deny">${group.denyCount} deny</span>` : ''}
+              </div>
+            </div>
+            <div class="sub">${escapeHtml(group.description)}</div>
+            ${rows}
+          </div>
+        `;
+      }).join('');
+
+      return `
+        <div class="card">
+          <div class="card-title">
+            <span>Workspace Native Agent Config Sync</span>
+            <span class="sub">${escapeHtml(currentReport.selectedWorkspace.name)}</span>
+          </div>
+          <div class="grid-2">
+            <div class="stat-box">
+              <div style="display:flex;justify-content:space-between;">
+                <strong>Claude (.claude/settings.json)</strong>
+                <span class="badge ${ns.claudeSynced ? 'allow' : 'neutral'}">${ns.claudeSynced ? 'Synced' : 'Default'}</span>
+              </div>
+              <span class="sub">${ns.claudeAllowCount} allow / ${ns.claudeDenyCount} deny rules</span>
+            </div>
+            <div class="stat-box">
+              <div style="display:flex;justify-content:space-between;">
+                <strong>Codex (.codex/rules)</strong>
+                <span class="badge ${ns.codexSynced ? 'allow' : 'neutral'}">${ns.codexSynced ? 'Synced' : 'Default'}</span>
+              </div>
+              <span class="sub">${ns.codexRuleCount} execpolicy prefix_rules</span>
+            </div>
+            <div class="stat-box">
+              <div style="display:flex;justify-content:space-between;">
+                <strong>Antigravity (.gemini/settings.json)</strong>
+                <span class="badge ${ns.geminiSynced ? 'allow' : 'neutral'}">${ns.geminiSynced ? 'Synced' : 'Default'}</span>
+              </div>
+              <span class="sub">${ns.geminiAllowCount} allow / ${ns.geminiDenyCount} exclude rules</span>
+            </div>
+          </div>
+          <div class="controls" style="margin-top:4px;">
+            <input id="ruleSearch" type="text" placeholder="Filter CLI commands (e.g. git, docker, kubectl, sudo, rm)..." value="${escapeHtml(searchFilter)}" />
+            <select id="actionSelect" style="max-width:130px;">
+              <option value="all" ${actionFilter === 'all' ? 'selected' : ''}>All Actions</option>
+              <option value="allow" ${actionFilter === 'allow' ? 'selected' : ''}>Allowed Only</option>
+              <option value="deny" ${actionFilter === 'deny' ? 'selected' : ''}>Blocked Only</option>
+            </select>
+          </div>
+        </div>
+        ${groupsHtml || '<div class="card"><div class="sub">No matching CLI permission rules found.</div></div>'}
+      `;
+    }
+
+    function renderSandboxTab() {
+      const selectedAgent = document.getElementById('agentFilter').value;
+      const agents = currentReport.agents.filter(a => selectedAgent === 'all' || a.agent === selectedAgent);
+
+      const activeHtml = currentReport.activeSandboxes.length > 0
+        ? `<div class="card">
+            <div class="card-title"><span>Running OpenShell Sandboxes</span><span class="badge allow">${currentReport.activeSandboxes.length} Ready</span></div>
+            ${currentReport.activeSandboxes.map(sb => `
+              <div class="cmd-row">
+                <div class="cmd-left">
+                  <div class="cmd-code">${escapeHtml(sb.name)}</div>
+                  <div class="cmd-meta">Agent: ${escapeHtml(sb.agent)} • Created: ${escapeHtml(sb.created)}</div>
+                </div>
+                <span class="badge allow">${escapeHtml(sb.phase)}</span>
+              </div>
+            `).join('')}
+          </div>`
+        : '';
+
+      const agentsHtml = agents.map(a => `
+        <div class="card">
+          <div class="card-title">
+            <span>${escapeHtml(a.displayName)} <code class="mono">(${escapeHtml(a.agent)})</code></span>
+            <div style="display:flex;gap:4px;">
+              <span class="badge ${a.hostWrapperInstalled ? 'allow' : 'deny'}">${a.hostWrapperInstalled ? 'Wrapper Installed' : 'Missing Wrapper'}</span>
+              <span class="badge allow">Landlock: ${escapeHtml(a.landlockMode)}</span>
+            </div>
+          </div>
+          <div class="sub">Image: <code class="mono">${escapeHtml(a.containerImage)}</code> • Profile: <code class="mono">${escapeHtml(a.providerProfile)}</code></div>
+
+          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Compatible Launch CLI Commands</div>
+          ${a.surfaces.map(s => `
+            <div class="cmd-row">
+              <div class="cmd-left">
+                <div class="cmd-code">${escapeHtml(s.cliExample)}</div>
+                <div class="cmd-meta">${escapeHtml(s.surface)} • ${escapeHtml(s.transport)}</div>
+              </div>
+              <button class="copy-btn" data-copy="${escapeHtml(s.cliExample)}">Copy</button>
+            </div>
+          `).join('')}
+
+          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Allowed Container Binaries &amp; Credential Placeholders</div>
+          <div class="chips">
+            ${a.allowedBinaries.map(b => `<span class="chip">${escapeHtml(b)}</span>`).join('')}
+            ${a.credentialPlaceholders.map(c => `<span class="chip" title="Supervisor placeholder env">${escapeHtml(c)}=openshell:resolve:...</span>`).join('')}
+          </div>
+
+          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Landlock Filesystem Policy</div>
+          <div class="cmd-row">
+            <div class="cmd-left">
+              <div class="cmd-meta"><span class="badge allow">READ-WRITE</span> <span class="mono">${escapeHtml(a.filesystemReadWrite.join(', '))}</span></div>
+              <div class="cmd-meta" style="margin-top:4px;"><span class="badge neutral">READ-ONLY</span> <span class="mono">${escapeHtml(a.filesystemReadOnly.join(', '))}</span></div>
+            </div>
+          </div>
+
+          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Allowed Network Egress Endpoints (Coupled to CLI Commands)</div>
+          ${a.endpoints.map(ep => `
+            <div class="cmd-row">
+              <div class="cmd-left">
+                <div class="cmd-code">${escapeHtml(ep.host)}:${escapeHtml(ep.port)} <span class="sub">(${escapeHtml(ep.policyName)})</span></div>
+                <div class="cmd-meta">
+                  <span>Compatible CLI: <code class="mono">${escapeHtml(ep.compatibleCliCommands.join(', '))}</code></span>
+                  <span>• Source: ${escapeHtml(ep.source)}</span>
+                </div>
+              </div>
+              <span class="badge ${ep.access === 'read-only' ? 'neutral' : 'allow'}">${escapeHtml(ep.access)}</span>
+            </div>
+          `).join('')}
+        </div>
+      `).join('');
+
+      return activeHtml + agentsHtml;
+    }
+
+    function renderDelegationTab() {
+      const d = currentReport.delegation;
+      const grantsHtml = d.activeGrants.length > 0
+        ? d.activeGrants.map(g => `
+            <div class="cmd-row">
+              <div class="cmd-left">
+                <div class="cmd-code">${escapeHtml(g.terminal)}</div>
+                <div class="cmd-meta">Agents: ${escapeHtml(g.agents.join(', '))} • Depth: ${g.depth}/${g.maxDepth} • Remaining workers: ${g.remainingWorkers}/${g.maxWorkers}</div>
+              </div>
+              <span class="badge allow">Active Grant</span>
+            </div>
+          `).join('')
+        : '<div class="sub">No active terminal grants currently open.</div>';
+
+      return `
+        <div class="card">
+          <div class="card-title">
+            <span>In-Sandbox Worker Delegation Policy</span>
+            <span class="badge ${d.autoGrantEnabled ? 'allow' : 'neutral'}">${d.autoGrantEnabled ? 'Auto-Grant Enabled' : 'Manual Grant'}</span>
+          </div>
+          <div class="sub">
+            Allowed Worker Agents: <code class="mono">${escapeHtml(d.allowedAgents.join(', '))}</code> •
+            Max Workers: <code class="mono">${d.maxWorkers}</code> •
+            Max Depth: <code class="mono">${d.maxDepth}</code>
+          </div>
+          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Active Coordinator Terminal Grants</div>
+          ${grantsHtml}
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            <span>Allowed In-Sandbox <code class="mono">orca orchestration</code> CLI Commands</span>
+            <span class="badge allow">FIFO Broker</span>
+          </div>
+          ${d.allowedCliCommands.map(c => `
+            <div class="cmd-row">
+              <div class="cmd-left">
+                <div class="cmd-code">${escapeHtml(c.command)}</div>
+                <div class="cmd-meta">${escapeHtml(c.description)}</div>
+              </div>
+              <button class="copy-btn" data-copy="${escapeHtml(c.command)}">Copy</button>
+            </div>
+          `).join('')}
+          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Refused / Blocked CLI Flags Inside Sandbox</div>
+          <div class="chips">
+            ${d.blockedFlags.map(f => `<span class="chip" style="border-color:var(--danger);color:var(--danger);">${escapeHtml(f)}</span>`).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderActiveTab() {
+      if (!currentReport) return;
+      const container = document.getElementById('tabContent');
+      if (activeTab === 'cli') container.innerHTML = renderCliTab();
+      else if (activeTab === 'sandbox') container.innerHTML = renderSandboxTab();
+      else container.innerHTML = renderDelegationTab();
+
+      const ruleSearch = document.getElementById('ruleSearch');
+      if (ruleSearch) {
+        ruleSearch.addEventListener('input', (e) => {
+          searchFilter = e.target.value;
+          renderActiveTab();
+          const input = document.getElementById('ruleSearch');
+          if (input) {
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+          }
+        });
+      }
+      const actionSelect = document.getElementById('actionSelect');
+      if (actionSelect) {
+        actionSelect.addEventListener('change', (e) => {
+          actionFilter = e.target.value;
+          renderActiveTab();
+        });
+      }
+    }
+
+    document.addEventListener('click', (e) => {
+      const target = e.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      if (target.dataset.copy) {
+        copyText(target.dataset.copy, target);
+      } else if (target.classList.contains('sample-cmd')) {
+        const cmd = target.dataset.cmd || '';
+        document.getElementById('cmdInput').value = cmd;
+        runCommandCheck(cmd);
+      } else if (target.classList.contains('tab')) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        target.classList.add('active');
+        activeTab = target.dataset.tab || 'cli';
+        renderActiveTab();
+      }
+    });
+
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+      const ws = document.getElementById('workspaceSelect').value;
+      loadReport(ws);
+    });
+    document.getElementById('workspaceSelect').addEventListener('change', (e) => {
+      loadReport(e.target.value);
+    });
+    document.getElementById('agentFilter').addEventListener('change', () => {
+      renderActiveTab();
+    });
+    document.getElementById('testBtn').addEventListener('click', () => {
+      runCommandCheck(document.getElementById('cmdInput').value);
+    });
+    document.getElementById('cmdInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') runCommandCheck(e.target.value);
+    });
+
+    loadReport();
+  </script>
+</body>
+</html>

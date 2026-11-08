@@ -5,7 +5,7 @@ Run **Claude Code**, **Google Antigravity**, and **OpenAI Codex** in disposable 
 For detailed Orca orchestration architecture and usage, see [`docs/ORCA_INTEGRATION.md`](docs/ORCA_INTEGRATION.md).
 
 The repository includes:
-- A trusted Orca launch hook plugin in [`orca-plugin/`](orca-plugin/) (`local.openshell-bridge`) that routes terminal launches of `claude`, `antigravity`/`agy`, and `codex` into isolated OpenShell sandboxes.
+- A trusted Orca launch hook & policy inspector plugin in [`orca-plugin/`](orca-plugin/) (`local.openshell-bridge`) that routes terminal launches of `claude`, `antigravity`/`agy`, and `codex` into isolated OpenShell sandboxes and adds an interactive **OpenShell Policies** sidebar panel coupling allowed policies to compatible CLI commands.
 - A host-side FIFO delegation broker (`orca-delegation`) that allows a sandboxed coordinator agent to securely spawn and supervise worker agents in separate OpenShell sandboxes without exposing host sockets or Orca runtime tokens.
 - Dedicated Orca Landlock & network policies in [`policies/`](policies/).
 
@@ -36,7 +36,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 1. `./install.sh` builds the three container images (`openshell-claude:latest`, `openshell-antigravity:latest`, `openshell-codex:latest`), imports OpenShell provider profiles, and installs standalone wrappers.
 2. `./scripts/install-orca-host.sh` bundles and installs `agent-box` (`claude-box`, `agy-box`, `codex-box`), `orca-delegation`, `orca-delegation-shim.js`, the Orca policies under `~/.agents/orca-openshell-policies/`, and configures Orca's `agentCmdOverrides` so **both Chat Mode (`--surface chat`) and Terminal Mode (`--surface terminal`)** launch inside OpenShell sandboxes.
-3. `orca plugin install` activates the `agent.launch.before` hook in Orca for terminal launches.
+3. `orca plugin install` activates the `agent.launch.before` hook, the `OpenShell: Enforced` status bar indicator, and the **OpenShell Policies** inspector panel in Orca.
 
 ### Standalone usage
 
@@ -46,8 +46,9 @@ agy-box --prompt "Explain Landlock briefly"
 codex-box app-server
 ```
 
-### Orca Chat Mode, Terminal Mode & In-Sandbox Worker Delegation
+### Orca Chat Mode, Terminal Mode & Policy Inspector
 
+- **OpenShell Policies Panel (`local.openshell-bridge`)**: Open the **OpenShell Policies** right-sidebar panel in Orca (or run `orca plugin open local.openshell-bridge --panel policies`) to view all allowed/denied CLI command patterns (`.agents/permissions/*.yml`), test arbitrary CLI commands for policy compatibility, verify native `.claude` / `.codex` / `.gemini` sync status, inspect Landlock filesystem & HTTPS egress policies per agent, and view allowed `orca orchestration` delegation commands.
 - **Chat Mode (`surface: "chat"`)**: Launching Claude or Codex from the Orca frontend UI (or `orca agent launch --agent claude --surface chat`) runs `claude-box` / `codex-box` with `ORCA_STRUCTURED_SESSION=1` over full-duplex SSH streaming (`openshell sandbox ssh-config`), rewrites host/container paths in real time, and merges workspace changes and session transcripts back to the host at the end of every turn. *(Note: Antigravity in Orca Chat Mode uses Orca's internal `agy_acp_server.par` runtime; use Terminal Mode for `agy-box` sandboxes).*
 - **Terminal Mode (`surface: "terminal"`)**: Launching any supported agent in an Orca terminal (`orca agent launch --agent claude --surface terminal`) wraps the interactive TUI inside an OpenShell sandbox via the `local.openshell-bridge` launch hook.
 

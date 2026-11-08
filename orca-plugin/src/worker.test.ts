@@ -3,7 +3,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import activate, { bridgeCommand } from './worker.ts'
+import activate, { bridgeCommand, formatCliPolicySummary } from './worker.ts'
+import { buildPolicyReport, evaluateCommandPolicy, parsePermissionYaml } from './policy-inspector.ts'
 
 test('rewrites Orca launch command while preserving flags and prompt', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-bridge-test-'))
@@ -71,3 +72,70 @@ test('hook forwards only nonreserved environment keys accepted by Orca', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('parses permission policies coupled to CLI commands and evaluates command compatibility', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-policy-inspector-test-'))
+  try {
+    const homeDir = path.join(dir, 'home')
+    const wsDir = path.join(dir, 'workspace')
+    const permDir = path.join(homeDir, '.agents', 'permissions')
+    const wsPermDir = path.join(wsDir, '.agents', 'permissions')
+    fs.mkdirSync(permDir, { recursive: true })
+    fs.mkdirSync(wsPermDir, { recursive: true })
+
+    fs.writeFileSync(
+      path.join(permDir, 'security-baseline.yml'),
+      [
+        'name: security-baseline',
+        'description: Baseline security rules',
+        'allow:',
+        '  - "Bash(pwd)"',
+        '  - "Bash(git status:*)"',
+        'deny:',
+        '  - "Bash(sudo)"',
+        '  - "Bash(sudo:*)"',
+      ].join('\n')
+    )
+    fs.writeFileSync(
+      path.join(wsPermDir, 'project.yml'),
+      [
+        'name: project',
+        'description: Project workflow commands',
+        'allow:',
+        '  - "Bash(bun test)"',
+        '  - "Bash(bun test:*)"',
+      ].join('\n')
+    )
+
+    const group = parsePermissionYaml(
+      fs.readFileSync(path.join(permDir, 'security-baseline.yml'), 'utf8'),
+      'security-baseline.yml',
+      'global'
+    )
+    assert.equal(group.allowCount, 2)
+    assert.equal(group.denyCount, 2)
+    assert.equal(group.rules[1].cliCommand, 'git status [args...]')
+
+    const report = buildPolicyReport({ workspacePath: wsDir, homeDir })
+    assert.equal(report.permissionGroups.length, 2)
+    assert.equal(report.agents.length, 3)
+
+    const allowEval = evaluateCommandPolicy('git status -s', report)
+    assert.equal(allowEval.verdict, 'allow')
+
+    const denyEval = evaluateCommandPolicy('sudo rm -rf /', report)
+    assert.equal(denyEval.verdict, 'deny')
+
+    const delegEval = evaluateCommandPolicy('orca orchestration worker-start --agent claude --spec "Test"', report)
+    assert.equal(delegEval.verdict, 'allow')
+
+    const spoofEval = evaluateCommandPolicy('orca orchestration send --from forged --to coordinator --body "hi"', report)
+    assert.equal(spoofEval.verdict, 'deny')
+
+    const summary = formatCliPolicySummary(wsDir)
+    assert.match(summary, /OpenShell Policy & CLI Command Report/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
