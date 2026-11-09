@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ## ==============================================================================
-# OpenShell Sandboxes Installer: agy-box, codex-box & claude-box
+# ADE NVIDIA OpenShell Plugin Installer: agy-box, codex-box & claude-box
 # ==============================================================================
 # This script sets up fully isolated, Landlock-sandboxed runners for:
 #   1. Google Antigravity CLI (agy-box)
@@ -34,7 +34,7 @@ for arg in "$@"; do
 done
 
 echo "========================================================================"
-echo "  Installing OpenShell Sandbox Runners (agy-box, codex-box & claude-box)"
+echo "  ADE NVIDIA OpenShell Plugin Installer (agy-box, codex-box & claude-box)"
 echo "========================================================================"
 echo ""
 

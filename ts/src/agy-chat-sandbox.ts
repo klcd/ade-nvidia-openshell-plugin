@@ -604,6 +604,7 @@ export interface BlockedEgressInfo {
   method: string;
   path: string;
   binary: string;
+  commandLine?: string;
 }
 
 export function detectBlockedEgress(
@@ -641,6 +642,7 @@ export function detectBlockedEgress(
             method: (rm.method || 'GET').toUpperCase(),
             path: rm.path || '/**',
             binary: rm.binary || '*',
+            commandLine: commandLine.trim(),
           };
         }
       } catch {}
@@ -682,6 +684,7 @@ export function detectBlockedEgress(
     method,
     path: cleanPath,
     binary: '*',
+    commandLine: commandLine.trim(),
   };
 }
 
@@ -813,6 +816,7 @@ export async function runAgyChatExec(shellName: string, commandLine: string): Pr
         '--path', blocked.path,
         '--binary', blocked.binary || '*',
         '--sandbox', state.sandboxName,
+        ...(blocked.commandLine ? ['--trigger-command', blocked.commandLine] : []),
       ]);
 
       // runAgyPolicyAdd uses `openshell policy update --wait`, so the policy revision is already loaded
@@ -896,6 +900,7 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
   let binary = '*';
   let sandboxName = '';
   let agent = 'antigravity';
+  let triggerCommand = '';
 
   for (let i = 0; i < rawArgs.length; i++) {
     const arg = rawArgs[i];
@@ -907,6 +912,7 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
     else if (arg === '--binary' && rawArgs[i + 1]) binary = rawArgs[++i];
     else if (arg === '--sandbox' && rawArgs[i + 1]) sandboxName = rawArgs[++i];
     else if (arg === '--agent' && rawArgs[i + 1]) agent = rawArgs[++i];
+    else if (arg === '--trigger-command' && rawArgs[i + 1]) triggerCommand = rawArgs[++i];
   }
 
   if (!host) {
@@ -950,6 +956,9 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
     if (!ep) {
       ep = { host, port, protocol: 'rest', enforcement: 'enforce' };
       endpoints.push(ep);
+    }
+    if (triggerCommand && triggerCommand.trim()) {
+      ep.trigger_command = triggerCommand.trim();
     }
     delete ep.access;
     ep.rules = Array.isArray(ep.rules) ? ep.rules : [];

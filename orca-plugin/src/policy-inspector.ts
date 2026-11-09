@@ -1,5 +1,7 @@
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -12,7 +14,9 @@ export interface CliPermissionRule {
   action: 'allow' | 'ask' | 'deny'
   scope: 'global' | 'workspace'
   groupName: string
+  groupDescription: string
   sourceFile: string
+  explanation: string
   compatibleAgents: string[]
 }
 
@@ -36,6 +40,7 @@ export interface L7HttpRule {
 export interface NetworkEndpointRule {
   policyName: string
   source: string
+  sourcePath?: string
   host: string
   port: number
   protocol: string
@@ -43,6 +48,8 @@ export interface NetworkEndpointRule {
   enforcement: string
   binaries: string[]
   compatibleCliCommands: string[]
+  triggerSource: string
+  triggerExplanation: string
   l7Rules?: L7HttpRule[]
 }
 
@@ -142,6 +149,7 @@ export interface L7PolicySuggestion {
   method: string
   path: string
   binary: string
+  triggerCommand?: string
 }
 
 export interface CommandEvaluationResult {
@@ -169,6 +177,7 @@ export interface AddL7PolicyRequest {
   method?: string
   path?: string
   binary?: string
+  triggerCommand?: string
 }
 
 export interface AddL7PolicyResult {
@@ -247,6 +256,17 @@ export function parsePermissionYaml(
       const tool = ruleMatch ? ruleMatch[1] : 'Bash'
       const pattern = ruleMatch ? ruleMatch[2].trim() : item
       const { cliCommand, baseBinary } = formatCliPattern(tool, pattern)
+      const groupDesc = description || `${scope === 'global' ? 'Global' : 'Workspace'} ${name} policy`
+      const actionVerb =
+        currentList === 'allow'
+          ? 'Permits automatic execution without confirmation'
+          : currentList === 'ask'
+            ? 'Requires interactive user approval before execution'
+            : 'Hard-blocks execution inside and outside the sandbox'
+      const scopePath =
+        scope === 'global'
+          ? `~/.agents/permissions/${sourceFile}`
+          : `.agents/permissions/${sourceFile}`
       rules.push({
         raw: item,
         tool,
@@ -256,7 +276,9 @@ export function parsePermissionYaml(
         action: currentList,
         scope,
         groupName: name,
+        groupDescription: groupDesc,
         sourceFile,
+        explanation: `${actionVerb} for \`${cliCommand}\` under ${scope} policy "${name}" (${groupDesc}, defined in \`${scopePath}\`).`,
         compatibleAgents: ['claude', 'codex', 'antigravity'],
       })
     }
@@ -294,9 +316,109 @@ function compatibleCommandsForHost(host: string): string[] {
     return ['agy', 'antigravity', 'agy-box']
   }
   if (host.includes('github.com') || host.includes('githubusercontent.com')) {
-    return ['gh pr view', 'git fetch', 'git ls-remote']
+    return ['gh pr view', 'git fetch', 'git ls-remote', 'curl https://api.github.com/...']
   }
-  return ['curl', 'fetch']
+  if (host.includes('pypi.org') || host.includes('pythonhosted.org')) {
+    return ['pip install <pkg>', 'uv pip install <pkg>']
+  }
+  if (host.includes('crates.io')) {
+    return ['cargo add <crate>', 'cargo test']
+  }
+  return [`curl -sS https://${host}/...`, 'wget', 'fetch']
+}
+
+export function describeEndpointRelation(params: {
+  host: string
+  port: number
+  policyName: string
+  source: string
+  binaries: string[]
+  l7Rules?: L7HttpRule[]
+  triggerCommand?: string
+}): { triggerSource: string; triggerExplanation: string } {
+  const { host, port, policyName, source, binaries, l7Rules, triggerCommand } = params
+  const h = host.toLowerCase()
+
+  if (triggerCommand && triggerCommand.trim()) {
+    const cmd = triggerCommand.trim()
+    const tokens = cmd.split(/\s+/)
+    const shortCmd = tokens.slice(0, 2).join(' ')
+    return {
+      triggerSource: shortCmd.length <= 20 ? shortCmd : (tokens[0] || 'cli').slice(0, 20),
+      triggerExplanation: `Triggered directly by CLI command/script \`${cmd}\` accessing https://${host}:${port} (defined in ${source}, policy \`${policyName}\`).`,
+    }
+  }
+
+  if (h === 'api.anthropic.com') {
+    return {
+      triggerSource: 'claude',
+      triggerExplanation: `Claude Code CLI (\`/usr/local/bin/claude\`) streams LLM inference turns, tool invocations, and token counting to \`https://${host}:${port}\` using supervisor-injected \`CLAUDE_CODE_OAUTH_TOKEN\` / \`ANTHROPIC_API_KEY\`.`,
+    }
+  }
+  if (h.includes('statsig') || h.includes('sentry.io') || h.includes('datadoghq.com')) {
+    return {
+      triggerSource: 'claude sdk',
+      triggerExplanation: `Claude Code startup and runtime SDK (\`/usr/local/bin/claude\`) queries \`${host}\` for feature-flag evaluation and crash diagnostics (${source}).`,
+    }
+  }
+  if (h === 'api.openai.com' || h === 'chatgpt.com' || h === 'ab.chatgpt.com') {
+    return {
+      triggerSource: 'codex',
+      triggerExplanation: `OpenAI Codex CLI (\`/usr/local/bin/codex app-server\`) connects to \`https://${host}:${port}\` for model responses, tool execution turns, and workspace turns (${source}).`,
+    }
+  }
+  if (h === 'auth.openai.com') {
+    return {
+      triggerSource: 'codex auth',
+      triggerExplanation: `Codex OAuth provider (\`codex-orca\`) refreshes short-lived session access tokens against \`https://${host}:${port}\` inside the OpenShell gateway.`,
+    }
+  }
+  if (h.includes('cloudcode-pa.googleapis.com')) {
+    return {
+      triggerSource: 'agy',
+      triggerExplanation: `Google Antigravity agent runtime (\`/usr/local/bin/agy\`) streams model completions and tool steps through \`https://${host}:${port}\` (${source}).`,
+    }
+  }
+  if (h === 'oauth2.googleapis.com' || h === 'accounts.google.com') {
+    return {
+      triggerSource: 'agy auth',
+      triggerExplanation: `Google Antigravity CLI exchanges and refreshes \`GOOGLE_OAUTH_*\` credentials against \`https://${host}:${port}\` (${source}).`,
+    }
+  }
+  if (h === 'www.googleapis.com' || h === 'storage.googleapis.com' || h.includes('googleusercontent.com')) {
+    return {
+      triggerSource: 'agy cloud',
+      triggerExplanation: `Google Antigravity CLI and SDK tools fetch workspace metadata and cloud storage resources from \`https://${host}:${port}\` (${source}).`,
+    }
+  }
+  if (h.includes('npmjs.org')) {
+    return {
+      triggerSource: 'npm / bun',
+      triggerExplanation: `Package manager commands (\`npm install\`, \`npm view\`, \`bun install\`, \`npx\`) fetch package tarballs and registry metadata from \`https://${host}:${port}\` (${source}).`,
+    }
+  }
+  if (h === 'api.github.com' || h.includes('github.com') || h.includes('githubusercontent.com')) {
+    const l7Desc = l7Rules?.length
+      ? ` with L7 filter (${l7Rules.map(r => `${r.action.toUpperCase()} ${r.method} ${r.path}`).join(', ')})`
+      : ''
+    return {
+      triggerSource: 'gh / git',
+      triggerExplanation: `GitHub CLI (\`gh pr\`, \`gh issue\`, \`gh api\`), \`git fetch/push\`, or \`curl\` scripts calling \`https://${host}:${port}\`${l7Desc} (defined in ${source}).`,
+    }
+  }
+
+  const shortBins = binaries
+    .map(b => path.basename(b))
+    .filter(Boolean)
+    .slice(0, 2)
+    .join(', ')
+  const l7Note = l7Rules?.length
+    ? ` Enforces L7 HTTP rules: ${l7Rules.map(r => `${r.action.toUpperCase()} ${r.method} ${r.path}`).join(', ')}.`
+    : ''
+  return {
+    triggerSource: shortBins || 'curl / script',
+    triggerExplanation: `Outbound requests from ${binaries.length ? `binaries \`${binaries.join(', ')}\`` : 'sandbox CLI commands or scripts'} to \`https://${host}:${port}\` via policy \`${policyName}\` (${source}).${l7Note}`,
+  }
 }
 
 /** Parse either JSON or simple YAML OpenShell policy files. */
@@ -349,16 +471,31 @@ export function parseOpenShellPolicyFile(filePath: string): ParsedOpenShellPolic
                 })
               }
             }
-            result.endpoints.push({
-              policyName: netPol?.name || policyKey,
+            const hostStr = String(ep.host)
+            const portNum = Number(ep.port || 443)
+            const polName = netPol?.name || policyKey
+            const rel = describeEndpointRelation({
+              host: hostStr,
+              port: portNum,
+              policyName: polName,
               source: sourceLabel,
-              host: String(ep.host),
-              port: Number(ep.port || 443),
+              binaries,
+              l7Rules: l7Rules.length > 0 ? l7Rules : undefined,
+              triggerCommand: ep?.trigger_command || netPol?.trigger_command,
+            })
+            result.endpoints.push({
+              policyName: polName,
+              source: sourceLabel,
+              sourcePath: filePath,
+              host: hostStr,
+              port: portNum,
               protocol: String(ep.protocol || 'rest'),
               access: String(ep.access || (l7Rules.length > 0 ? 'l7-rules' : 'read-write')),
               enforcement: String(ep.enforcement || 'enforce'),
               binaries,
-              compatibleCliCommands: compatibleCommandsForHost(String(ep.host)),
+              compatibleCliCommands: compatibleCommandsForHost(hostStr),
+              triggerSource: rel.triggerSource,
+              triggerExplanation: rel.triggerExplanation,
               ...(l7Rules.length > 0 ? { l7Rules } : {}),
             })
           }
@@ -377,16 +514,29 @@ export function parseOpenShellPolicyFile(filePath: string): ParsedOpenShellPolic
 
   const flushEndpoint = () => {
     if (currentEndpoint?.host) {
+      const hostStr = currentEndpoint.host
+      const portNum = currentEndpoint.port ?? 443
+      const bins = currentEndpoint.binaries ?? []
+      const rel = describeEndpointRelation({
+        host: hostStr,
+        port: portNum,
+        policyName: currentNetPolicy,
+        source: sourceLabel,
+        binaries: bins,
+      })
       result.endpoints.push({
         policyName: currentNetPolicy,
         source: sourceLabel,
-        host: currentEndpoint.host,
-        port: currentEndpoint.port ?? 443,
+        sourcePath: filePath,
+        host: hostStr,
+        port: portNum,
         protocol: currentEndpoint.protocol ?? 'rest',
         access: currentEndpoint.access ?? 'read-write',
         enforcement: currentEndpoint.enforcement ?? 'enforce',
-        binaries: currentEndpoint.binaries ?? [],
-        compatibleCliCommands: compatibleCommandsForHost(currentEndpoint.host),
+        binaries: bins,
+        compatibleCliCommands: compatibleCommandsForHost(hostStr),
+        triggerSource: rel.triggerSource,
+        triggerExplanation: rel.triggerExplanation,
       })
     }
     currentEndpoint = null
@@ -472,108 +622,220 @@ export interface CurrentOrcaContext {
   activeAgentSessions: ActiveAgentSessionInfo[]
 }
 
+interface OrcaWorktreePsEntry {
+  worktreeId?: string
+  path?: string
+  repo?: string
+  displayName?: string
+  branch?: string | null
+  isActive?: boolean
+  agents?: Array<{
+    paneKey?: string | null
+    state?: string
+    agentType?: string
+    conversationName?: string | null
+    updatedAt?: number
+  }>
+}
+
+let cachedOrcaWorktrees: OrcaWorktreePsEntry[] = []
+let lastOrcaRefreshAt = 0
+let orcaRefreshInFlight: Promise<void> | null = null
+
+let cachedSandboxes: ActiveSandboxInfo[] = []
+let lastSandboxRefreshAt = 0
+let sandboxRefreshInFlight: Promise<void> | null = null
+
+function resolveOrcaUserDataPath(homeDir = os.homedir()): string {
+  if (process.env.ORCA_USER_DATA_PATH) return process.env.ORCA_USER_DATA_PATH
+  if (process.platform === 'darwin') {
+    return path.join(homeDir, 'Library', 'Application Support', 'orca')
+  }
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(homeDir, '.config'), 'orca')
+}
+
+async function queryOrcaWorktreePsViaSocket(homeDir = os.homedir(), timeoutMs = 1200): Promise<OrcaWorktreePsEntry[] | null> {
+  const metadataPath = path.join(resolveOrcaUserDataPath(homeDir), 'orca-runtime.json')
+  if (!fs.existsSync(metadataPath)) return null
+  let metadata: {
+    authToken?: string
+    transports?: Array<{ kind?: string; endpoint?: string }>
+    transport?: { kind?: string; endpoint?: string }
+  }
+  try {
+    metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+  } catch {
+    return null
+  }
+  const transports = Array.isArray(metadata.transports)
+    ? metadata.transports
+    : metadata.transport
+      ? [metadata.transport]
+      : []
+  const unixTransport = transports.find(t => t?.kind === 'unix' && t?.endpoint)
+  if (!unixTransport?.endpoint || !metadata.authToken) return null
+
+  return await new Promise<OrcaWorktreePsEntry[] | null>((resolve) => {
+    const socket = net.createConnection(unixTransport.endpoint!)
+    let buffer = ''
+    let settled = false
+    const reqId = crypto.randomUUID()
+
+    const finish = (val: OrcaWorktreePsEntry[] | null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { socket.destroy() } catch {}
+      resolve(val)
+    }
+
+    const timer = setTimeout(() => finish(null), timeoutMs)
+    timer.unref?.()
+
+    socket.setEncoding('utf8')
+    socket.once('error', () => finish(null))
+    socket.once('close', () => finish(null))
+    socket.on('data', (chunk: string) => {
+      buffer += chunk
+      let idx: number
+      while ((idx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, idx).trim()
+        buffer = buffer.slice(idx + 1)
+        if (!line) continue
+        try {
+          const frame = JSON.parse(line)
+          if (frame?._keepalive) continue
+          if (frame?.id === reqId) {
+            const wts = frame?.result?.worktrees
+            finish(Array.isArray(wts) ? wts : null)
+            return
+          }
+        } catch {
+          finish(null)
+          return
+        }
+      }
+    })
+    socket.once('connect', () => {
+      try {
+        socket.write(`${JSON.stringify({
+          id: reqId,
+          authToken: metadata.authToken,
+          method: 'worktree.ps',
+          params: { limit: 15 },
+        })}\n`)
+      } catch {
+        finish(null)
+      }
+    })
+  })
+}
+
+export async function refreshOrcaContextCache(homeDir = os.homedir()): Promise<void> {
+  const now = Date.now()
+  if (orcaRefreshInFlight) return orcaRefreshInFlight
+  if (now - lastOrcaRefreshAt < 1500 && cachedOrcaWorktrees.length > 0) return
+
+  orcaRefreshInFlight = (async () => {
+    try {
+      const worktrees = await queryOrcaWorktreePsViaSocket(homeDir, 1200)
+      if (worktrees && worktrees.length > 0) {
+        cachedOrcaWorktrees = worktrees
+        lastOrcaRefreshAt = Date.now()
+      }
+    } catch {} finally {
+      orcaRefreshInFlight = null
+    }
+  })()
+  return orcaRefreshInFlight
+}
+
+function parseSandboxListOutput(out: string): ActiveSandboxInfo[] {
+  const lines = out
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('NAME') && !l.startsWith('No sandboxes'))
+  return lines.map(line => {
+    const parts = line.split(/\s{2,}/)
+    const name = parts[0] || line.split(/\s+/)[0] || ''
+    const created = parts[1] || ''
+    const phase = parts[2] || 'Unknown'
+    const agent = name.startsWith('cc-')
+      ? 'claude'
+      : name.startsWith('cx-')
+        ? 'codex'
+        : name.startsWith('ag-')
+          ? 'antigravity'
+          : 'custom'
+    return { name, created, phase, agent }
+  })
+}
+
+export async function refreshActiveSandboxesCache(): Promise<void> {
+  const now = Date.now()
+  if (sandboxRefreshInFlight) return sandboxRefreshInFlight
+  if (now - lastSandboxRefreshAt < 2000) return
+
+  sandboxRefreshInFlight = new Promise<void>((resolve) => {
+    execFile('openshell', ['sandbox', 'list'], { timeout: 2000 }, (err, stdout) => {
+      if (!err && typeof stdout === 'string') {
+        cachedSandboxes = parseSandboxListOutput(stdout)
+        lastSandboxRefreshAt = Date.now()
+      }
+      sandboxRefreshInFlight = null
+      resolve()
+    })
+  })
+  return sandboxRefreshInFlight
+}
+
 /**
- * Queries Orca for the currently active worktree (`orca worktree current --json` + `orca worktree ps --json`)
- * and detects the currently running/active agent in that worktree.
+ * Queries Orca for the currently active worktree and detects the currently running/active agent in that worktree.
+ * Uses the non-blocking socket RPC cache so the Orca worker event loop is never blocked by synchronous CLI spawns.
  */
 export function discoverCurrentOrcaContext(options?: {
   workspacePath?: string
   agent?: string
+  homeDir?: string
 }): CurrentOrcaContext {
   let activeWorkspace: WorkspaceEntry | null = null
   const activeAgentSessions: ActiveAgentSessionInfo[] = []
   let detectedAgent: 'claude' | 'codex' | 'antigravity' | null = normalizeAgentId(options?.agent)
 
-  // If an explicit workspacePath is passed (e.g. unit tests), honour it directly without slow CLI calls if it's a temp dir
   const isExplicitTestPath =
     Boolean(options?.workspacePath) &&
     (options!.workspacePath!.includes('openshell-policy-test-') || !fs.existsSync(path.join(options!.workspacePath!, '.git')))
 
   if (!isExplicitTestPath) {
-    // 1. Check `orca worktree current --json` for the exact focused project in Orca UI
-    try {
-      const currentOut = execFileSync('orca', ['worktree', 'current', '--json'], {
-        encoding: 'utf8',
-        timeout: 2500,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      })
-      const parsed = JSON.parse(currentOut) as {
-        result?: {
-          worktree?: {
-            id?: string
-            path?: string
-            displayName?: string
-            branch?: string | null
-          }
-        }
-      }
-      const wt = parsed.result?.worktree
-      if (wt?.path && (!options?.workspacePath || wt.path === options.workspacePath)) {
-        activeWorkspace = {
-          id: wt.id || `local::${wt.path}`,
-          name: wt.displayName || path.basename(wt.path),
-          path: wt.path,
-          branch: wt.branch ? wt.branch.replace(/^refs\/heads\//, '') : null,
-        }
-      }
-    } catch {}
+    // Trigger background refresh for future calls without blocking
+    void refreshOrcaContextCache(options?.homeDir)
 
-    // 2. Check `orca worktree ps --limit 15 --json` to find active agent sessions in the current worktree
-    try {
-      const psOut = execFileSync('orca', ['worktree', 'ps', '--limit', '15', '--json'], {
-        encoding: 'utf8',
-        timeout: 2500,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      })
-      const parsed = JSON.parse(psOut) as {
-        result?: {
-          worktrees?: Array<{
-            worktreeId?: string
-            path?: string
-            repo?: string
-            displayName?: string
-            branch?: string | null
-            isActive?: boolean
-            agents?: Array<{
-              paneKey?: string | null
-              state?: string
-              agentType?: string
-              conversationName?: string | null
-              updatedAt?: number
-            }>
-          }>
-        }
-      }
-      const worktrees = parsed.result?.worktrees ?? []
-      const targetWt =
-        (options?.workspacePath ? worktrees.find(w => w.path === options.workspacePath) : undefined) ||
-        (activeWorkspace ? worktrees.find(w => w.path === activeWorkspace!.path) : undefined) ||
-        worktrees.find(w => w.isActive) ||
-        worktrees[0]
+    const worktrees = cachedOrcaWorktrees
+    const targetWt =
+      (options?.workspacePath ? worktrees.find(w => w.path === options.workspacePath) : undefined) ||
+      worktrees.find(w => w.isActive) ||
+      worktrees[0]
 
-      if (targetWt?.path) {
-        if (!activeWorkspace) {
-          activeWorkspace = {
-            id: targetWt.worktreeId || `local::${targetWt.path}`,
-            name: targetWt.repo || targetWt.displayName || path.basename(targetWt.path),
-            path: targetWt.path,
-            branch: targetWt.branch ? targetWt.branch.replace(/^refs\/heads\//, '') : null,
-          }
-        }
-        for (const ag of targetWt.agents ?? []) {
-          const norm = normalizeAgentId(ag.agentType)
-          if (norm) {
-            activeAgentSessions.push({
-              agent: norm,
-              state: ag.state || 'unknown',
-              conversationName: ag.conversationName || null,
-              paneKey: ag.paneKey || null,
-              updatedAt: Number(ag.updatedAt ?? 0),
-            })
-          }
+    if (targetWt?.path) {
+      activeWorkspace = {
+        id: targetWt.worktreeId || `local::${targetWt.path}`,
+        name: targetWt.repo || targetWt.displayName || path.basename(targetWt.path),
+        path: targetWt.path,
+        branch: targetWt.branch ? targetWt.branch.replace(/^refs\/heads\//, '') : null,
+      }
+      for (const ag of targetWt.agents ?? []) {
+        const norm = normalizeAgentId(ag.agentType)
+        if (norm) {
+          activeAgentSessions.push({
+            agent: norm,
+            state: ag.state || 'unknown',
+            conversationName: ag.conversationName || null,
+            paneKey: ag.paneKey || null,
+            updatedAt: Number(ag.updatedAt ?? 0),
+          })
         }
       }
-    } catch {}
+    }
   }
 
   if (!activeWorkspace) {
@@ -609,39 +871,14 @@ export function discoverCurrentOrcaContext(options?: {
 
   return {
     workspace: activeWorkspace,
-    currentAgent: detectedAgent || 'claude',
+    currentAgent: detectedAgent || 'antigravity',
     activeAgentSessions,
   }
 }
 
 export function listActiveSandboxes(): ActiveSandboxInfo[] {
-  try {
-    const out = execFileSync('openshell', ['sandbox', 'list'], {
-      encoding: 'utf8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    const lines = out
-      .split(/\r?\n/)
-      .map(l => l.trim())
-      .filter(l => l && !l.startsWith('NAME') && !l.startsWith('No sandboxes'))
-    return lines.map(line => {
-      const parts = line.split(/\s{2,}/)
-      const name = parts[0] || line.split(/\s+/)[0] || ''
-      const created = parts[1] || ''
-      const phase = parts[2] || 'Unknown'
-      const agent = name.startsWith('cc-')
-        ? 'claude'
-        : name.startsWith('cx-')
-          ? 'codex'
-          : name.startsWith('ag-')
-            ? 'antigravity'
-            : 'custom'
-      return { name, created, phase, agent }
-    })
-  } catch {
-    return []
-  }
+  void refreshActiveSandboxesCache()
+  return cachedSandboxes
 }
 
 export function loadPermissionGroups(workspacePath: string, homeDir = os.homedir()): PermissionGroupSummary[] {
@@ -717,6 +954,20 @@ export function inspectNativeSync(workspacePath: string): NativeAgentSyncStatus 
   }
 }
 
+export async function buildPolicyReportAsync(options?: {
+  workspacePath?: string
+  agent?: string
+  homeDir?: string
+  binDir?: string
+  orcaPolicyDir?: string
+}): Promise<PolicyInspectionReport> {
+  await Promise.all([
+    refreshOrcaContextCache(options?.homeDir),
+    refreshActiveSandboxesCache(),
+  ])
+  return buildPolicyReport(options)
+}
+
 export function buildPolicyReport(options?: {
   workspacePath?: string
   agent?: string
@@ -734,6 +985,7 @@ export function buildPolicyReport(options?: {
   const context = discoverCurrentOrcaContext({
     workspacePath: options?.workspacePath,
     agent: options?.agent,
+    homeDir,
   })
   const selectedWorkspace = context.workspace
   const currentAgent = context.currentAgent
@@ -817,17 +1069,32 @@ export function buildPolicyReport(options?: {
     ])
 
     const endpoints: NetworkEndpointRule[] = [
-      ...profileEndpoints.map(ep => ({
-        policyName: `provider:${providerProfile}`,
-        source: `${providerProfile}.profile.yaml`,
-        host: ep.host,
-        port: ep.port ?? 443,
-        protocol: 'rest',
-        access: 'read-write',
-        enforcement: 'enforce',
-        binaries: allowedBinaries,
-        compatibleCliCommands: compatibleCommandsForHost(ep.host),
-      })),
+      ...profileEndpoints.map(ep => {
+        const portNum = ep.port ?? 443
+        const polName = `provider:${providerProfile}`
+        const srcName = `${providerProfile}.profile.yaml`
+        const rel = describeEndpointRelation({
+          host: ep.host,
+          port: portNum,
+          policyName: polName,
+          source: srcName,
+          binaries: allowedBinaries,
+        })
+        return {
+          policyName: polName,
+          source: srcName,
+          sourcePath: `profiles/${srcName}`,
+          host: ep.host,
+          port: portNum,
+          protocol: 'rest',
+          access: 'read-write',
+          enforcement: 'enforce',
+          binaries: allowedBinaries,
+          compatibleCliCommands: compatibleCommandsForHost(ep.host),
+          triggerSource: rel.triggerSource,
+          triggerExplanation: rel.triggerExplanation,
+        }
+      }),
       ...globalDefaultPolicy.endpoints,
       ...agentYamlPolicy.endpoints,
       ...orcaPolicy.endpoints,
@@ -1039,6 +1306,42 @@ export function buildPolicyReport(options?: {
   const allSandboxes = listActiveSandboxes()
   const activeSandboxes = allSandboxes.filter(sb => sb.agent === currentAgent)
 
+  const orcaBrokerRules: CliPermissionRule[] = [
+    ...delegation.allowedCliCommands.map(c => {
+      const subVerb = c.command.split(/\s+/)[2] || 'orchestration'
+      return {
+        raw: `Bash(orca orchestration ${subVerb}:*)`,
+        tool: 'Bash',
+        pattern: `orca orchestration ${subVerb}:*`,
+        cliCommand: c.command,
+        baseBinary: 'orca',
+        action: 'allow' as const,
+        scope: (delegation.configPath ? 'workspace' : 'global') as 'workspace' | 'global',
+        groupName: 'delegation-broker',
+        groupDescription: 'OpenShell FIFO Delegation Broker shim (/sandbox/.orca-delegate/bin/orca)',
+        sourceFile: delegation.configPath ? 'delegation.json' : 'orca-delegation-shim.js',
+        explanation: `${c.description}. Allowed over the restricted OpenShell exec FIFO channel (${delegation.autoGrantEnabled ? 'Auto-Grant enabled' : 'Manual grant'}, maxWorkers: ${delegation.maxWorkers}, maxDepth: ${delegation.maxDepth}).`,
+        compatibleAgents: ['claude', 'codex', 'antigravity'],
+      }
+    }),
+    {
+      raw: 'Bash(orca orchestration * --token|--server-url|--from|--environment)',
+      tool: 'Bash',
+      pattern: 'orca orchestration * --from:*',
+      cliCommand: 'orca orchestration [subcmd] --from | --token | --server-url | --environment',
+      baseBinary: 'orca',
+      action: 'deny' as const,
+      scope: 'global' as const,
+      groupName: 'delegation-broker',
+      groupDescription: 'OpenShell FIFO Delegation Broker shim (/sandbox/.orca-delegate/bin/orca)',
+      sourceFile: 'orca-delegation-shim.js',
+      explanation: `Hard-blocks privileged identity spoofing and remote placement override flags (${delegation.blockedFlags.join(', ')}) inside the sandbox.`,
+      compatibleAgents: ['claude', 'codex', 'antigravity'],
+    },
+  ]
+
+  const combinedCliRules = [...allCliRules, ...orcaBrokerRules]
+
   return {
     generatedAt: new Date().toISOString(),
     selectedWorkspace,
@@ -1048,7 +1351,7 @@ export function buildPolicyReport(options?: {
     activeSandboxes,
     agents,
     permissionGroups,
-    allCliRules,
+    allCliRules: combinedCliRules,
     delegation,
     nativeSync: inspectNativeSync(selectedWorkspace.path),
   }
@@ -1161,6 +1464,7 @@ export function evaluateCommandPolicy(command: string, report: PolicyInspectionR
       method,
       path: rawPath.endsWith('*') ? rawPath : `${rawPath.replace(/\/$/, '') || ''}/**`,
       binary: '*',
+      triggerCommand: trimmed,
     }
 
     const allEndpoints = report.agents.flatMap(a => a.endpoints)
@@ -1190,6 +1494,7 @@ export function evaluateCommandPolicy(command: string, report: PolicyInspectionR
       method: /gh\s+(?:pr|issue)\s+(?:create|edit|comment|merge|close)/i.test(trimmed) ? 'POST' : 'GET',
       path: '/repos/**',
       binary: '/usr/bin/gh',
+      triggerCommand: trimmed,
     }
   } else if (/^(?:npm|npx|bun)\s+/.test(trimmed)) {
     l7Suggestion = {
@@ -1200,6 +1505,7 @@ export function evaluateCommandPolicy(command: string, report: PolicyInspectionR
       method: 'GET',
       path: '/**',
       binary: '*',
+      triggerCommand: trimmed,
     }
   }
 
@@ -1305,6 +1611,9 @@ export function addL7Policy(
         enforcement: 'enforce',
       }
       endpoints.push(ep)
+    }
+    if (req.triggerCommand && req.triggerCommand.trim()) {
+      ep.trigger_command = req.triggerCommand.trim()
     }
     // OpenShell L7 rules cannot be combined with access presets on the same endpoint
     delete ep.access

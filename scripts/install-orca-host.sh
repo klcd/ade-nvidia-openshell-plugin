@@ -146,6 +146,18 @@ orca plugin validate "$ROOT/orca-plugin" --json
 mkdir -p "$HOME/Library/Application Support/orca/antigravity-chat/config/skills/openshell-egress-popup"
 install -m 644 "$ROOT/.agents/skills/openshell-egress-popup/SKILL.md" "$HOME/Library/Application Support/orca/antigravity-chat/config/skills/openshell-egress-popup/SKILL.md"
 
+INSTALL_OUT="$(orca plugin install "$ROOT/orca-plugin" --json 2>&1 || true)"
+FP="$(printf '%s' "$INSTALL_OUT" | python3 -c 'import json,sys
+try:
+  d = json.loads(sys.stdin.read())
+  print(d.get("error", {}).get("data", {}).get("approvalFingerprint", ""))
+except Exception:
+  pass
+' 2>/dev/null || true)"
+if [[ -n "$FP" ]]; then
+  orca plugin install "$ROOT/orca-plugin" --approve "$FP" --json >/dev/null 2>&1 || true
+fi
+
 if [[ -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/runtime-client.js" ]]; then
   ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca -e '
 const { RuntimeClient } = require("/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/runtime-client.js");

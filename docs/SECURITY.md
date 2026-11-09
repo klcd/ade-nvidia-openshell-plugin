@@ -1,4 +1,4 @@
-# Security notes
+# ADE NVIDIA OpenShell Plugin — Security Notes
 
 Each run creates a disposable Linux sandbox through OpenShell. The policy applies filesystem restrictions through Landlock and network restrictions through OpenShell's supervisor. Review the actual policy and provider profile in `policies/` and `profiles/` before use.
 

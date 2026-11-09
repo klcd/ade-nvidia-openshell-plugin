@@ -153,6 +153,7 @@ test('parses permission policies coupled to CLI commands and evaluates command c
         method: 'GET',
         path: '/repos/**',
         binary: '/usr/bin/gh',
+        triggerCommand: 'gh pr view 115 --repo klcd/ade-nvidia-openshell-plugin',
       },
       { homeDir }
     )
@@ -164,6 +165,13 @@ test('parses permission policies coupled to CLI commands and evaluates command c
     assert.ok(ghEp)
     assert.equal(ghEp.l7Rules?.[0]?.method, 'GET')
     assert.equal(ghEp.l7Rules?.[0]?.path, '/repos/**')
+    assert.equal(ghEp.triggerSource, 'gh pr')
+    assert.match(ghEp.triggerExplanation, /gh pr view 115 --repo klcd\/ade-nvidia-openshell-plugin/)
+
+    const openAiEp = updatedReport.agents[0].endpoints.find(ep => ep.host === 'api.openai.com')
+    assert.ok(openAiEp)
+    assert.equal(openAiEp.triggerSource, 'codex')
+    assert.match(openAiEp.triggerExplanation, /OpenAI Codex CLI/)
 
     const summary = formatCliPolicySummary(wsDir)
     assert.match(summary, /OpenShell Policy & CLI Command Report/)

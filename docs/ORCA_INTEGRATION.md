@@ -1,8 +1,6 @@
-# Orca orchestration through OpenShell
+# ADE NVIDIA OpenShell Plugin — Orca Integration & Orchestration
 
-Verified with Orca 1.4.253 and OpenShell 0.1.2 on 2026-11-08. This tree copies
-the existing sibling `orca-openshell-bridge` checkout and extends that bridge;
-the original checkout was not replaced.
+Verified with Orca 1.4.253 and OpenShell 0.1.2 on 2026-11-08. This document describes how `ade-nvidia-openshell-plugin` integrates NVIDIA OpenShell sandboxes with Orca Chat Mode, Terminal Mode, L7 Egress Approval Popups, and multi-agent worker orchestration.
 
 ## Runtime boundary
 
@@ -130,7 +128,7 @@ Orca supports two launch surfaces:
    - **Host Plugin & Attachment Staging**: Host directories passed via `--add-dir`, `--plugin-dir`, or `--plugin-dir-no-mcp` (such as Orca's `native-chat-visuals` skill plugin and chat scratch folders) are staged into `/sandbox/.claude/orca-host-dirs/<slug>` and rewritten automatically.
    - **Per-Turn Workspace & Transcript Sync**: At the end of every turn (`"type": "result"` or `"method": "turn/completed"`), `runner.ts` merges nonconflicting workspace edits back to the host and syncs Claude `.jsonl` transcripts (`~/.claude/projects/<project-slug>/*.jsonl`) with container-to-host path rewriting before flushing the completion frame to Orca.
    - **Parent-PID Sandbox Watchdog**: A lightweight detached watchdog guarantees `openshell sandbox delete <name>` runs even if Orca's teardown supervisor delivers `SIGKILL`.
-   - *(Note: Antigravity in Chat Mode uses Orca's internal `agy_acp_server.par` runtime with `ignoreAgentCommandSetting: true`; use Terminal Mode for `agy-box` sandboxes.)*
+   - **Antigravity Chat Mode Sandbox (`agy-chat-sandbox.ts`)**: Routes `localharness_external` shell commands into a dedicated per-session OpenShell sandbox (`ag-safe-o-...`) over a persistent SSH `ControlMaster` channel with bidirectional delta sync and 2-LLM-turn interactive L7 egress approval popups.
 
 ## Policies and support
 

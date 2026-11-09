@@ -1,6 +1,6 @@
-# OpenShell Agent Bridges
+# ADE NVIDIA OpenShell Plugin (`ade-nvidia-openshell-plugin`)
 
-Run **Claude Code**, **Google Antigravity**, and **OpenAI Codex** in disposable Linux sandboxes managed by NVIDIA OpenShell—both standalone and natively integrated with **Orca** (including in-sandbox worker orchestration).
+Run **Claude Code**, **Google Antigravity**, and **OpenAI Codex** in disposable Linux sandboxes managed by **NVIDIA OpenShell**—both standalone and natively integrated with **Orca** (including Structured Chat Mode, Terminal Mode, L7 Egress Approval Popups, and in-sandbox worker orchestration).
 
 For detailed Orca orchestration architecture and usage, see [`docs/ORCA_INTEGRATION.md`](docs/ORCA_INTEGRATION.md).
 
@@ -48,7 +48,7 @@ codex-box app-server
 
 ### Orca Chat Mode, Terminal Mode & Policy Inspector
 
-- **OpenShell Policies Panel (`local.openshell-bridge`)**: Open the **OpenShell Policies** right-sidebar panel in Orca (or run `orca plugin open local.openshell-bridge --panel policies`) to view all allowed/denied CLI command patterns (`.agents/permissions/*.yml`), test arbitrary CLI commands for policy compatibility, dynamically add L7 HTTP rules (`Session`, `Project`, or `Global`), verify native `.claude` / `.codex` / `.gemini` sync status, inspect Landlock filesystem & HTTPS egress policies per agent, and view allowed `orca orchestration` delegation commands.
+- **OpenShell Policies Panel (`local.openshell-bridge`)**: Open the **OpenShell Policies** right-sidebar panel in Orca (or run `orca plugin open local.openshell-bridge --panel policies`) to view all allowed/denied CLI command patterns (`.agents/permissions/*.yml`), test arbitrary CLI commands for policy compatibility, dynamically add L7 HTTP rules (`Session`, `Project`, or `Global`), verify native `.claude` / `.codex` / `.gemini` sync status, inspect Landlock filesystem & foldable HTTPS egress cards (showing each host, a visual `read-write` / `read-only` / `l7-rules` dot, and a CLI/script source indicator that reveals the full explanation when unfolded), and view allowed `orca orchestration` delegation commands.
 - **Chat Mode (`surface: "chat"`)**:
   - **Claude & Codex**: Runs `claude-box` / `codex-box` with `ORCA_STRUCTURED_SESSION=1` over full-duplex SSH streaming (`openshell sandbox ssh-config`), rewrites host/container paths in real time, and merges workspace changes and session transcripts back to the host at the end of every turn.
   - **Antigravity**: Routes `localharness_external` shell commands into a dedicated per-session OpenShell sandbox (`ag-safe-o-...`) via `agy-chat-sandbox.ts` with a persistent SSH `ControlMaster` channel and bidirectional delta sync.

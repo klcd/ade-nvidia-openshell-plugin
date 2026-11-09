@@ -3,7 +3,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { addL7Policy, type AddL7PolicyRequest, buildPolicyReport, evaluateCommandPolicy } from './policy-inspector.ts'
+import { addL7Policy, type AddL7PolicyRequest, buildPolicyReport, buildPolicyReportAsync, evaluateCommandPolicy, type PolicyInspectionReport } from './policy-inspector.ts'
 
 const wrappers: Record<string, string> = {
   codex: 'codex-box',
@@ -78,10 +78,9 @@ export function formatCliPolicySummary(workspacePath?: string): string {
 export default function activate(orca: OrcaWorkerApi): void {
   let lastAgent: string | undefined
 
-  const refreshStatusBar = () => {
+  const updateStatusBarFromReport = (report: PolicyInspectionReport) => {
     if (!orca.host?.call) return
     try {
-      const report = buildPolicyReport({ agent: lastAgent })
       const activeCount = report.activeSandboxes.length
       const allowCount = report.allCliRules.filter(r => r.action === 'allow').length
       const text = activeCount > 0
@@ -96,6 +95,13 @@ export default function activate(orca: OrcaWorkerApi): void {
         visible: true,
       }).catch(() => {})
     } catch {}
+  }
+
+  const refreshStatusBar = () => {
+    if (!orca.host?.call) return
+    void buildPolicyReportAsync({ agent: lastAgent })
+      .then(updateStatusBarFromReport)
+      .catch(() => {})
   }
 
   orca.hooks.on('agent.launch.before', (event, next) => {
@@ -129,19 +135,19 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   })
 
-  orca.panels?.handle('getPolicyReport', (input) => {
+  orca.panels?.handle('getPolicyReport', async (input) => {
     const req = (input && typeof input === 'object' ? input : {}) as { workspacePath?: string; agent?: string }
-    const report = buildPolicyReport({
+    const report = await buildPolicyReportAsync({
       workspacePath: req.workspacePath,
       agent: req.agent || lastAgent,
     })
-    refreshStatusBar()
+    updateStatusBarFromReport(report)
     return report
   })
 
-  orca.panels?.handle('evaluateCommand', (input) => {
+  orca.panels?.handle('evaluateCommand', async (input) => {
     const req = (input && typeof input === 'object' ? input : {}) as { command?: string; workspacePath?: string; agent?: string }
-    const report = buildPolicyReport({
+    const report = await buildPolicyReportAsync({
       workspacePath: req.workspacePath,
       agent: req.agent || lastAgent,
     })
@@ -160,12 +166,13 @@ export default function activate(orca: OrcaWorkerApi): void {
     return res
   })
 
-  orca.commands?.register('openshell.inspectPolicies', () => {
+  orca.commands?.register('openshell.inspectPolicies', async () => {
+    await buildPolicyReportAsync({ agent: lastAgent })
     refreshStatusBar()
     return formatCliPolicySummary()
   })
 
   refreshStatusBar()
-  const timer = setInterval(refreshStatusBar, 3000)
+  const timer = setInterval(refreshStatusBar, 4000)
   timer.unref?.()
 }

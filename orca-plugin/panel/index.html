@@ -292,6 +292,92 @@
     gap: 6px;
     background: var(--bg);
   }
+  details.egress-fold {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  details.egress-fold > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 7px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    user-select: none;
+  }
+  details.egress-fold > summary::-webkit-details-marker {
+    display: none;
+  }
+  details.egress-fold > summary:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  details.egress-fold[open] > summary .fold-chevron {
+    transform: rotate(90deg);
+  }
+  .egress-fold-body {
+    padding: 8px 10px;
+    border-top: 1px solid var(--border);
+    background: rgba(0, 0, 0, 0.16);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 11.5px;
+  }
+  .access-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .access-dot.rw {
+    background: var(--success);
+    box-shadow: 0 0 0 2px rgba(46, 160, 67, 0.22);
+  }
+  .access-dot.ro {
+    background: #388bfd;
+    box-shadow: 0 0 0 2px rgba(56, 139, 253, 0.22);
+  }
+  .access-dot.l7 {
+    background: var(--warn);
+    box-shadow: 0 0 0 2px rgba(210, 153, 34, 0.22);
+  }
+  .access-dot.deny {
+    background: var(--danger);
+    box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.22);
+  }
+  .right-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 600;
+    background: var(--muted);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    white-space: nowrap;
+  }
+  .source-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    background: var(--muted);
+    border: 1px solid var(--border);
+    color: var(--muted-fg);
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 </style>
 </head>
 <body>
@@ -299,55 +385,45 @@
     <div class="header">
       <div class="header-top">
         <div class="title">
-          <span>OpenShell Policy &amp; CLI Inspector</span>
+          <span>OpenShell Policies</span>
           <span id="sandboxBadge" class="badge neutral">Loading...</span>
         </div>
         <button id="refreshBtn" title="Reload active project &amp; agent policies">Refresh</button>
       </div>
       <div id="contextBanner" class="grid-2" style="margin-top:2px;">
-        <div class="stat-box">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span class="sub">Current Project</span>
-            <span id="branchBadge" class="badge neutral">—</span>
+        <div class="stat-box" id="projectStatBox" style="flex-direction:row;justify-content:space-between;align-items:center;padding:7px 10px;">
+          <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+            <span class="sub" style="font-size:10px;">Project</span>
+            <strong id="projectLabel" class="mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Detecting...</strong>
           </div>
-          <strong id="projectLabel" class="mono" style="font-size:12px;">Detecting...</strong>
-          <span id="projectPathLabel" class="sub mono" style="font-size:10px;word-break:break-all;"></span>
+          <span id="branchBadge" class="badge neutral">—</span>
         </div>
-        <div class="stat-box">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span class="sub">Running Agent</span>
-            <span id="agentStateBadge" class="badge allow">Active</span>
+        <div class="stat-box" style="flex-direction:row;justify-content:space-between;align-items:center;padding:7px 10px;">
+          <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+            <span class="sub" style="font-size:10px;">Agent</span>
+            <strong id="agentLabel" class="mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Detecting...</strong>
           </div>
-          <strong id="agentLabel" class="mono" style="font-size:12px;">Detecting...</strong>
-          <span id="agentSessionLabel" class="sub" style="font-size:10px;"></span>
+          <span id="agentStateBadge" class="badge allow">Active</span>
         </div>
       </div>
     </div>
 
     <!-- Interactive CLI Command Policy Tester -->
-    <div class="card">
+    <div class="card" style="padding:8px 10px;gap:6px;">
       <div class="card-title">
-        <span>Test CLI Command Policy Compatibility</span>
-        <span class="sub">DENY &gt; ASK &gt; ALLOW + Landlock + Network</span>
+        <span>Test CLI Command</span>
       </div>
       <div class="tester-box">
-        <input id="cmdInput" type="text" class="mono" placeholder="e.g. git status, docker ps, sudo rm -rf /, orca orchestration worker-start..." />
+        <input id="cmdInput" type="text" class="mono" placeholder="Enter command to test..." />
         <button id="testBtn" class="primary">Check</button>
-      </div>
-      <div class="chips" id="sampleCmds">
-        <button class="copy-btn sample-cmd" data-cmd="git status -s">git status -s</button>
-        <button class="copy-btn sample-cmd" data-cmd="curl -X GET https://api.github.com/repos/klcd/nixos-config">curl api.github.com (L7)</button>
-        <button class="copy-btn sample-cmd" data-cmd="gh pr view 115">gh pr view (L7)</button>
-        <button class="copy-btn sample-cmd" id="sampleWorkerCmd" data-cmd="orca orchestration worker-start --agent claude --spec 'Run tests' --worktree current --json">orca worker-start</button>
-        <button class="copy-btn sample-cmd" data-cmd="sudo rm -rf /">sudo rm -rf /</button>
       </div>
       <div id="evalOutput" style="display:none;" class="eval-result"></div>
     </div>
 
     <div class="tabs">
       <button class="tab active" data-tab="cli">CLI Commands (<span id="cliCount">0</span>)</button>
-      <button class="tab" data-tab="sandbox">Agent Sandbox &amp; Egress</button>
-      <button class="tab" data-tab="delegation">Orchestration CLI</button>
+      <button class="tab" data-tab="egress">Sandbox Egress (<span id="egressCount">0</span>)</button>
+      <button class="tab" data-tab="system">Sandbox System</button>
     </div>
 
     <div id="tabContent"></div>
@@ -359,6 +435,8 @@
     let searchFilter = '';
     let actionFilter = 'all';
     const openApps = new Set();
+    const openEgress = new Set();
+    const openSystemItems = new Set();
 
     function escapeHtml(str) {
       return String(str ?? '')
@@ -389,7 +467,7 @@
           currentReport.activeSandboxes.length !== res.activeSandboxes.length;
         currentReport = res;
         renderHeader();
-        if (changedContext || !document.getElementById('ruleSearch')) {
+        if (changedContext || (!document.getElementById('ruleSearch') && !document.getElementById('egressSearch') && activeTab !== 'system')) {
           renderActiveTab();
         }
         const cmd = document.getElementById('cmdInput').value.trim();
@@ -406,18 +484,19 @@
       const badge = document.getElementById('sandboxBadge');
       badge.className = 'badge ' + (sbCount > 0 ? 'allow' : 'neutral');
       badge.textContent = sbCount > 0
-        ? `${sbCount} Active Sandbox${sbCount === 1 ? '' : 'es'}`
-        : 'Landlock Enforced';
+        ? `${sbCount} Sandbox${sbCount === 1 ? '' : 'es'}`
+        : 'Enforced';
 
       const ws = currentReport.selectedWorkspace;
       document.getElementById('projectLabel').textContent = ws.name;
-      document.getElementById('projectPathLabel').textContent = ws.path;
+      const projBox = document.getElementById('projectStatBox');
+      if (projBox) projBox.title = ws.path;
       const branchBadge = document.getElementById('branchBadge');
       branchBadge.textContent = ws.branch || 'main';
 
       const agentObj = currentReport.agents[0];
       const activeSession = (currentReport.activeAgentSessions || [])[0];
-      const agentDisplay = agentObj ? `${agentObj.displayName} (${agentObj.agent})` : currentReport.currentAgent;
+      const agentDisplay = agentObj ? agentObj.displayName : currentReport.currentAgent;
       document.getElementById('agentLabel').textContent = agentDisplay;
 
       const stateBadge = document.getElementById('agentStateBadge');
@@ -425,18 +504,12 @@
       stateBadge.textContent = sessionState.toUpperCase();
       stateBadge.className = 'badge ' + (sessionState === 'working' || sessionState === 'running' || sbCount > 0 ? 'allow' : 'neutral');
 
-      const sessionLabel = document.getElementById('agentSessionLabel');
-      sessionLabel.textContent = activeSession?.conversationName
-        ? activeSession.conversationName
-        : (agentObj ? `Wrapper: ${agentObj.agent === 'antigravity' ? 'agy-box' : agentObj.agent + '-box'}` : '');
-
-      const workerBtn = document.getElementById('sampleWorkerCmd');
-      if (workerBtn) {
-        workerBtn.dataset.cmd = `orca orchestration worker-start --agent ${currentReport.currentAgent} --spec 'Run tests' --worktree current --json`;
-      }
-
       const agentRules = currentReport.allCliRules.filter(r => r.compatibleAgents.includes(currentReport.currentAgent));
       document.getElementById('cliCount').textContent = String(agentRules.length);
+      const egressCountEl = document.getElementById('egressCount');
+      if (egressCountEl) {
+        egressCountEl.textContent = String(agentObj?.endpoints?.length || 0);
+      }
     }
 
     let lastL7Suggestion = null;
@@ -489,32 +562,39 @@
         });
         lastL7Suggestion = res.l7Suggestion || null;
         box.style.display = 'flex';
-        const badgeLabel = res.verdict.toUpperCase();
-        const rulesHtml = (res.matchedRules || []).map(r =>
-          `<div class="cmd-meta"><span class="badge ${escapeHtml(r.action)}">${escapeHtml(r.action.toUpperCase())}</span> <span class="mono">${escapeHtml(r.cliCommand)}</span> <span>(${escapeHtml(r.scope)}: ${escapeHtml(r.sourceFile)})</span></div>`
-        ).join('');
-        const checksHtml = (res.sandboxChecks || []).map(c =>
-          `<div class="cmd-meta"><span class="badge ${escapeHtml(c.status)}">${escapeHtml(c.status.toUpperCase())}</span> <strong>${escapeHtml(c.layer)}:</strong> <span>${escapeHtml(c.detail)}</span></div>`
-        ).join('');
+        const dotClassForAction = (act) => act === 'allow' || act === 'pass' ? 'rw' : act === 'ask' || act === 'warn' ? 'l7' : 'deny';
+        const verdictDot = dotClassForAction(res.verdict);
+        const rulesHtml = (res.matchedRules || []).map(r => {
+          const rDot = dotClassForAction(r.action);
+          return `<div class="cmd-meta" style="align-items:center;"><span class="access-dot ${rDot}" title="Rule: ${escapeHtml(r.action)}"></span><span class="mono" style="color:var(--fg);font-weight:600;">${escapeHtml(r.cliCommand)}</span><span class="source-pill" title="Source: ${escapeHtml(r.sourceFile)}">&#8984; ${escapeHtml(r.groupName)}</span></div>`;
+        }).join('');
+        const checksHtml = (res.sandboxChecks || []).map(c => {
+          const cDot = dotClassForAction(c.status);
+          return `<div class="cmd-meta" style="align-items:center;"><span class="access-dot ${cDot}" title="${escapeHtml(c.layer)}: ${escapeHtml(c.status)}"></span><strong style="color:var(--fg);">${escapeHtml(c.layer)}:</strong><span>${escapeHtml(c.detail)}</span></div>`;
+        }).join('');
         const l7ActionHtml = res.l7Suggestion
           ? `<div style="margin-top:4px;padding-top:6px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:6px;">
-              <div class="cmd-meta">
-                <strong>L7 HTTP Rule:</strong>
+              <div class="cmd-meta" style="align-items:center;">
+                <span class="access-dot l7" title="L7 HTTP Rule"></span>
+                <strong style="color:var(--fg);">L7 HTTP Rule:</strong>
                 <code class="mono">${escapeHtml(res.l7Suggestion.action.toUpperCase())} ${escapeHtml(res.l7Suggestion.method)} https://${escapeHtml(res.l7Suggestion.host)}:${res.l7Suggestion.port}${escapeHtml(res.l7Suggestion.path)}</code>
-                <span>(binary: <code class="mono">${escapeHtml(res.l7Suggestion.binary)}</code>)</span>
+                <span class="source-pill">&#8984; ${escapeHtml(res.l7Suggestion.binary)}</span>
               </div>
               <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Hot-reload on running sandbox via openshell policy update">+ Add L7 for Session (Live Sandbox)</button>
-                <button class="copy-btn quick-l7-btn" data-l7-scope="workspace" title="Save to <project>/.agents/policies/l7-custom.json &amp; apply live">+ Add L7 for Project</button>
-                <button class="copy-btn quick-l7-btn" data-l7-scope="global" title="Save to ~/.agents/orca-openshell-policies/<agent>.json &amp; apply live">+ Add L7 in General (${escapeHtml(currentReport.currentAgent)})</button>
+                <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Hot-reload on running sandbox via openshell policy update">+ Session</button>
+                <button class="copy-btn quick-l7-btn" data-l7-scope="workspace" title="Save to <project>/.agents/policies/l7-custom.json &amp; apply live">+ Project</button>
+                <button class="copy-btn quick-l7-btn" data-l7-scope="global" title="Save to ~/.agents/orca-openshell-policies/<agent>.json &amp; apply live">+ Global (${escapeHtml(currentReport.currentAgent)})</button>
               </div>
               <div id="quickL7Status" style="display:none;" class="eval-result"></div>
             </div>`
           : '';
         box.innerHTML = `
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span class="badge ${escapeHtml(res.verdict)}">${escapeHtml(badgeLabel)}</span>
-            <span class="mono" style="font-weight:600;">${escapeHtml(res.command)}</span>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:7px;min-width:0;">
+              <span class="access-dot ${verdictDot}" title="Verdict: ${escapeHtml(res.verdict)}"></span>
+              <span class="mono" style="font-weight:600;color:var(--fg);">${escapeHtml(res.command)}</span>
+            </div>
+            <span class="source-pill">${escapeHtml(res.verdict.toUpperCase())}</span>
           </div>
           <div class="sub">${escapeHtml(res.summary)}</div>
           ${rulesHtml}
@@ -523,45 +603,11 @@
         `;
       } catch (err) {
         box.style.display = 'flex';
-        box.innerHTML = `<span class="badge deny">Error</span><div>${escapeHtml(err?.message || err)}</div>`;
+        box.innerHTML = `<div style="display:flex;align-items:center;gap:6px;"><span class="access-dot deny"></span><div>${escapeHtml(err?.message || err)}</div></div>`;
       }
     }
 
-    function renderNativeSyncCard() {
-      const ns = currentReport.nativeSync;
-      const agent = currentReport.currentAgent;
-      if (agent === 'claude') {
-        return `
-          <div class="stat-box">
-            <div style="display:flex;justify-content:space-between;">
-              <strong>Claude Native Config (<code class="mono">.claude/settings.json</code>)</strong>
-              <span class="badge ${ns.claudeSynced ? 'allow' : 'neutral'}">${ns.claudeSynced ? 'Synced' : 'Default'}</span>
-            </div>
-            <span class="sub">${ns.claudeAllowCount} allow / ${ns.claudeDenyCount} deny rules in ${escapeHtml(currentReport.selectedWorkspace.name)}</span>
-          </div>
-        `;
-      }
-      if (agent === 'codex') {
-        return `
-          <div class="stat-box">
-            <div style="display:flex;justify-content:space-between;">
-              <strong>Codex Native Config (<code class="mono">.codex/rules/default.rules</code>)</strong>
-              <span class="badge ${ns.codexSynced ? 'allow' : 'neutral'}">${ns.codexSynced ? 'Synced' : 'Default'}</span>
-            </div>
-            <span class="sub">${ns.codexRuleCount} execpolicy prefix_rules in ${escapeHtml(currentReport.selectedWorkspace.name)}</span>
-          </div>
-        `;
-      }
-      return `
-        <div class="stat-box">
-          <div style="display:flex;justify-content:space-between;">
-            <strong>Antigravity Native Config (<code class="mono">.gemini/settings.json</code>)</strong>
-            <span class="badge ${ns.geminiSynced ? 'allow' : 'neutral'}">${ns.geminiSynced ? 'Synced' : 'Default'}</span>
-          </div>
-          <span class="sub">${ns.geminiAllowCount} allow / ${ns.geminiDenyCount} exclude rules in ${escapeHtml(currentReport.selectedWorkspace.name)}</span>
-        </div>
-      `;
-    }
+    const openCliRules = new Set();
 
     function renderCliTab() {
       const selectedAgent = currentReport.currentAgent;
@@ -577,7 +623,6 @@
                r.groupName.toLowerCase().includes(q);
       });
 
-      // Group rules by CLI application (baseBinary)
       const byApp = new Map();
       for (const r of filteredRules) {
         const appKey = r.baseBinary || r.tool || 'other';
@@ -591,37 +636,64 @@
         const allowCount = rules.filter(r => r.action === 'allow').length;
         const askCount = rules.filter(r => r.action === 'ask').length;
         const denyCount = rules.filter(r => r.action === 'deny').length;
-        const sources = [...new Set(rules.map(r => `${r.scope}:${r.groupName}`))].join(', ');
+        const sources = [...new Set(rules.map(r => r.groupName))].join(', ');
         const isOpen = Boolean(searchFilter) || openApps.has(appName);
+        const appDotClass = denyCount > 0 && allowCount === 0
+          ? 'deny'
+          : askCount > 0 && allowCount === 0
+            ? 'l7'
+            : 'rw';
 
-        const rows = rules.map(r => `
-          <div class="cmd-row">
-            <div class="cmd-left">
-              <div class="cmd-code">${escapeHtml(r.cliCommand)}</div>
-              <div class="cmd-meta">
-                <span>Rule: <code class="mono">${escapeHtml(r.raw)}</code></span>
-                <span>• Source: <code class="mono">${escapeHtml(r.scope)}/${escapeHtml(r.sourceFile)}</code></span>
+        const rows = rules.map(r => {
+          const ruleKey = `${r.scope}:${r.sourceFile}:${r.raw}`;
+          const isRuleOpen = openCliRules.has(ruleKey);
+          const dotClass = r.action === 'deny' ? 'deny' : r.action === 'ask' ? 'l7' : 'rw';
+          const cleanCmd = r.cliCommand.replace(/\s*\[args\.\.\.\]/, '');
+          const scopePath = r.scope === 'global'
+            ? `~/.agents/permissions/${r.sourceFile}`
+            : `.agents/permissions/${r.sourceFile}`;
+          const explanation = r.explanation ||
+            `${r.action.toUpperCase()} rule for ${r.cliCommand} (${scopePath}).`;
+
+          return `
+            <details class="egress-fold" data-cli-rule="${escapeHtml(ruleKey)}" ${isRuleOpen ? 'open' : ''}>
+              <summary>
+                <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                  <span class="fold-chevron">&#9654;</span>
+                  <span class="access-dot ${dotClass}" title="Right: ${escapeHtml(r.action)}"></span>
+                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.cliCommand)}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                  <span class="source-pill">&#8984; ${escapeHtml(r.groupName)}</span>
+                </div>
+              </summary>
+              <div class="egress-fold-body">
+                <div style="color:var(--fg);line-height:1.45;">
+                  ${escapeHtml(explanation)}
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:2px;">
+                  <span class="sub mono">${escapeHtml(scopePath)} &bull; ${escapeHtml(r.raw)}</span>
+                  <div style="display:flex;gap:4px;">
+                    <button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cleanCmd)}">Test</button>
+                    <button class="copy-btn" data-copy="${escapeHtml(cleanCmd)}">Copy</button>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div style="display:flex;align-items:center;gap:6px;">
-              <span class="badge ${escapeHtml(r.action)}">${escapeHtml(r.action.toUpperCase())}</span>
-              <button class="copy-btn" data-copy="${escapeHtml(r.cliCommand.replace(/\s*\[args\.\.\.\]/, ''))}">Copy</button>
-            </div>
-          </div>
-        `).join('');
+            </details>
+          `;
+        }).join('');
 
         return `
           <details class="app-fold" data-app="${escapeHtml(appName)}" ${isOpen ? 'open' : ''}>
             <summary>
-              <div style="display:flex;align-items:center;gap:6px;min-width:0;">
-                <span class="fold-chevron">▶</span>
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="fold-chevron">&#9654;</span>
+                <span class="access-dot ${appDotClass}"></span>
                 <code class="mono" style="font-size:12px;font-weight:700;">${escapeHtml(appName)}</code>
-                <span class="sub" style="font-weight:400;">(${rules.length} rule${rules.length === 1 ? '' : 's'} • ${escapeHtml(sources)})</span>
+                <span class="sub" style="font-weight:400;">(${rules.length})</span>
               </div>
-              <div style="display:flex;gap:4px;flex-shrink:0;">
-                ${allowCount ? `<span class="badge allow">${allowCount} allow</span>` : ''}
-                ${askCount ? `<span class="badge ask">${askCount} ask</span>` : ''}
-                ${denyCount ? `<span class="badge deny">${denyCount} deny</span>` : ''}
+              <div style="display:flex;gap:4px;align-items:center;flex-shrink:0;">
+                <span class="source-pill">&#8984; ${escapeHtml(sources)}</span>
               </div>
             </summary>
             <div class="app-fold-body">
@@ -632,190 +704,300 @@
       }).join('');
 
       return `
-        <div class="card">
-          ${renderNativeSyncCard()}
-          <div class="controls" style="margin-top:4px;">
-            <input id="ruleSearch" type="text" placeholder="Filter CLI application or command (e.g. git, docker, kubectl, sudo)..." value="${escapeHtml(searchFilter)}" />
-            <select id="actionSelect" style="max-width:120px;">
-              <option value="all" ${actionFilter === 'all' ? 'selected' : ''}>All Actions</option>
-              <option value="allow" ${actionFilter === 'allow' ? 'selected' : ''}>Allowed Only</option>
-              <option value="deny" ${actionFilter === 'deny' ? 'selected' : ''}>Blocked Only</option>
-            </select>
-            <button id="expandAllBtn" class="copy-btn" title="Expand all CLI applications">Expand All</button>
-            <button id="collapseAllBtn" class="copy-btn" title="Collapse all CLI applications">Collapse All</button>
-          </div>
+        <div class="controls">
+          <input id="ruleSearch" type="text" placeholder="Filter CLI command (e.g. git, docker, kubectl, orca)..." value="${escapeHtml(searchFilter)}" />
+          <select id="actionSelect" style="max-width:105px;">
+            <option value="all" ${actionFilter === 'all' ? 'selected' : ''}>All</option>
+            <option value="allow" ${actionFilter === 'allow' ? 'selected' : ''}>Allow</option>
+            <option value="ask" ${actionFilter === 'ask' ? 'selected' : ''}>Ask</option>
+            <option value="deny" ${actionFilter === 'deny' ? 'selected' : ''}>Deny</option>
+          </select>
+          <button id="expandAllBtn" class="copy-btn">Expand</button>
+          <button id="collapseAllBtn" class="copy-btn">Collapse</button>
         </div>
         ${appsHtml || '<div class="card"><div class="sub">No matching CLI permission rules found.</div></div>'}
       `;
     }
 
-    function renderSandboxTab() {
-      const agents = currentReport.agents;
+    let egressSearch = '';
+    const openSections = new Set();
 
-      const l7ComposerHtml = `
-        <div class="card">
-          <div class="card-title">
-            <span>Add Dynamic L7 HTTP Egress Policy</span>
-            <span class="sub">Session (Hot-Reload) or Persistent</span>
+    function renderEgressTab() {
+      const agents = currentReport.agents;
+      const a = agents[0];
+      if (!a) {
+        return `<div class="card"><div class="sub">No agent profile found.</div></div>`;
+      }
+
+      const l7ComposerFoldHtml = `
+        <details class="app-fold" data-section="l7-composer" ${openSections.has('l7-composer') ? 'open' : ''}>
+          <summary>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span class="fold-chevron">&#9654;</span>
+              <span class="access-dot l7"></span>
+              <span>+ Add L7 Egress Rule</span>
+            </div>
+            <span class="source-pill">&#8984; l7-policy</span>
+          </summary>
+          <div class="app-fold-body">
+            <div class="controls">
+              <select id="l7Scope" style="max-width:170px;">
+                <option value="workspace">Project (.agents/policies)</option>
+                <option value="global">Global (${escapeHtml(currentReport.currentAgent)}.json)</option>
+                <option value="session">Session (Live Sandbox)</option>
+              </select>
+              <select id="l7Action" style="max-width:90px;">
+                <option value="allow">ALLOW</option>
+                <option value="deny">DENY</option>
+              </select>
+              <select id="l7Method" style="max-width:90px;">
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+                <option value="*">* (ANY)</option>
+              </select>
+            </div>
+            <div class="controls">
+              <input id="l7Host" type="text" class="mono" placeholder="Host (e.g. api.github.com)" style="flex:2;" />
+              <input id="l7Port" type="text" class="mono" value="443" placeholder="Port" style="max-width:60px;" />
+              <input id="l7Path" type="text" class="mono" value="/repos/**" placeholder="Path (e.g. /repos/**)" style="flex:2;" />
+            </div>
+            <div class="controls">
+              <input id="l7Binary" type="text" class="mono" value="*" placeholder="Binary (e.g. /usr/bin/gh)" style="flex:1;" />
+              <input id="l7TriggerCmd" type="text" class="mono" placeholder="Triggering CLI / script" style="flex:2;" />
+              <button id="addL7Btn" class="primary">Add</button>
+            </div>
+            <div id="l7ComposerStatus" style="display:none;" class="eval-result"></div>
           </div>
-          <div class="controls">
-            <select id="l7Scope" style="max-width:190px;" title="Where to apply this L7 policy">
-              <option value="workspace">Project (${escapeHtml(currentReport.selectedWorkspace.name)}/.agents/policies)</option>
-              <option value="global">In General (~/.agents/orca-openshell-policies/${escapeHtml(currentReport.currentAgent)}.json)</option>
-              <option value="session">Current Session Only (Live Sandbox)</option>
-            </select>
-            <select id="l7Action" style="max-width:95px;">
-              <option value="allow">ALLOW</option>
-              <option value="deny">DENY</option>
-            </select>
-            <select id="l7Method" style="max-width:95px;">
-              <option value="GET">GET</option>
-              <option value="POST">POST</option>
-              <option value="PUT">PUT</option>
-              <option value="PATCH">PATCH</option>
-              <option value="DELETE">DELETE</option>
-              <option value="*">* (ANY)</option>
-            </select>
-          </div>
-          <div class="controls">
-            <input id="l7Host" type="text" class="mono" placeholder="Host (e.g. api.github.com)" style="flex:2;" />
-            <input id="l7Port" type="text" class="mono" value="443" placeholder="Port" style="max-width:65px;" />
-            <input id="l7Path" type="text" class="mono" value="/repos/**" placeholder="Path glob (e.g. /repos/**)" style="flex:2;" />
-          </div>
-          <div class="controls">
-            <input id="l7Binary" type="text" class="mono" value="*" placeholder="Binary path (e.g. /usr/bin/gh or * for any)" style="flex:1;" />
-            <button id="addL7Btn" class="primary">Add L7 Policy</button>
-          </div>
-          <div id="l7ComposerStatus" style="display:none;" class="eval-result"></div>
-        </div>
+        </details>
       `;
 
-      const activeHtml = currentReport.activeSandboxes.length > 0
-        ? `<div class="card">
-            <div class="card-title"><span>Running OpenShell Sandboxes (${escapeHtml(currentReport.currentAgent)})</span><span class="badge allow">${currentReport.activeSandboxes.length} Ready</span></div>
-            ${currentReport.activeSandboxes.map(sb => `
-              <div class="cmd-row">
-                <div class="cmd-left">
-                  <div class="cmd-code">${escapeHtml(sb.name)}</div>
-                  <div class="cmd-meta">Agent: ${escapeHtml(sb.agent)} • Created: ${escapeHtml(sb.created)}</div>
-                </div>
-                <span class="badge allow">${escapeHtml(sb.phase)}</span>
+      const filteredEndpoints = a.endpoints.filter(ep => {
+        if (!egressSearch) return true;
+        const q = egressSearch.toLowerCase();
+        return ep.host.toLowerCase().includes(q) ||
+               (ep.triggerSource || '').toLowerCase().includes(q) ||
+               (ep.triggerExplanation || '').toLowerCase().includes(q) ||
+               (ep.policyName || '').toLowerCase().includes(q) ||
+               (ep.compatibleCliCommands || []).some(c => c.toLowerCase().includes(q));
+      });
+
+      const endpointsHtml = filteredEndpoints.map(ep => {
+        const epKey = `${ep.host}:${ep.port}:${ep.policyName}`;
+        const isOpen = Boolean(egressSearch) || openEgress.has(epKey);
+        const hasDenyRule = (ep.l7Rules || []).some(r => r.action === 'deny') && !(ep.l7Rules || []).some(r => r.action === 'allow');
+        const dotClass = hasDenyRule
+          ? 'deny'
+          : ep.access === 'read-only'
+            ? 'ro'
+            : (ep.access === 'l7-rules' || (ep.l7Rules && ep.l7Rules.length > 0))
+              ? 'l7'
+              : 'rw';
+        const triggerLabel = ep.triggerSource || (ep.compatibleCliCommands && ep.compatibleCliCommands[0]) || 'cli';
+        const explanationText = ep.triggerExplanation ||
+          `Outbound network egress to ${ep.host}:${ep.port} triggered by ${(ep.compatibleCliCommands || []).join(', ')} (defined in ${ep.source}).`;
+        const l7Html = (ep.l7Rules || []).length > 0
+          ? `<div class="chips" style="margin-top:2px;">${ep.l7Rules.map(r =>
+              `<span class="right-pill"><span class="access-dot ${r.action === 'deny' ? 'deny' : 'rw'}" style="width:6px;height:6px;box-shadow:none;"></span>${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`
+            ).join('')}</div>`
+          : '';
+        const cliChipsHtml = (ep.compatibleCliCommands || []).length > 0
+          ? `<div class="chips">${ep.compatibleCliCommands.map(cmd =>
+              `<button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cmd.replace(/<[^>]+>/g, 'test'))}">${escapeHtml(cmd)}</button>`
+            ).join('')}</div>`
+          : '';
+
+        return `
+          <details class="egress-fold" data-egress="${escapeHtml(epKey)}" ${isOpen ? 'open' : ''}>
+            <summary>
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="fold-chevron">&#9654;</span>
+                <span class="access-dot ${dotClass}" title="Right: ${escapeHtml(ep.access)}"></span>
+                <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(ep.host)}${ep.port && ep.port !== 443 ? ':' + escapeHtml(ep.port) : ''}</span>
               </div>
-            `).join('')}
-          </div>`
-        : '';
-
-      const agentsHtml = agents.map(a => `
-        <div class="card">
-          <div class="card-title">
-            <span>${escapeHtml(a.displayName)} <code class="mono">(${escapeHtml(a.agent)})</code></span>
-            <div style="display:flex;gap:4px;">
-              <span class="badge ${a.hostWrapperInstalled ? 'allow' : 'deny'}">${a.hostWrapperInstalled ? 'Wrapper Installed' : 'Missing Wrapper'}</span>
-              <span class="badge allow">Landlock: ${escapeHtml(a.landlockMode)}</span>
-            </div>
-          </div>
-          <div class="sub">Image: <code class="mono">${escapeHtml(a.containerImage)}</code> • Profile: <code class="mono">${escapeHtml(a.providerProfile)}</code></div>
-
-          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Compatible Launch CLI Commands</div>
-          ${a.surfaces.map(s => `
-            <div class="cmd-row">
-              <div class="cmd-left">
-                <div class="cmd-code">${escapeHtml(s.cliExample)}</div>
-                <div class="cmd-meta">${escapeHtml(s.surface)} • ${escapeHtml(s.transport)}</div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                <span class="source-pill">&#8984; ${escapeHtml(triggerLabel)}</span>
               </div>
-              <button class="copy-btn" data-copy="${escapeHtml(s.cliExample)}">Copy</button>
-            </div>
-          `).join('')}
-
-          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Allowed Container Binaries &amp; Credential Placeholders</div>
-          <div class="chips">
-            ${a.allowedBinaries.map(b => `<span class="chip">${escapeHtml(b)}</span>`).join('')}
-            ${a.credentialPlaceholders.map(c => `<span class="chip" title="Supervisor placeholder env">${escapeHtml(c)}=openshell:resolve:...</span>`).join('')}
-          </div>
-
-          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Landlock Filesystem Policy (${escapeHtml(currentReport.selectedWorkspace.name)})</div>
-          <div class="cmd-row">
-            <div class="cmd-left">
-              <div class="cmd-meta"><span class="badge allow">READ-WRITE</span> <span class="mono">${escapeHtml(a.filesystemReadWrite.join(', '))}</span></div>
-              <div class="cmd-meta" style="margin-top:4px;"><span class="badge neutral">READ-ONLY</span> <span class="mono">${escapeHtml(a.filesystemReadOnly.join(', '))}</span></div>
-            </div>
-          </div>
-
-          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Allowed Network &amp; L7 Egress Endpoints (Coupled to CLI Commands)</div>
-          ${a.endpoints.map(ep => {
-            const l7Html = (ep.l7Rules || []).length > 0
-              ? `<div class="chips" style="margin-top:3px;">${ep.l7Rules.map(r =>
-                  `<span class="badge ${r.action === 'deny' ? 'deny' : 'allow'}">${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`
-                ).join('')}</div>`
-              : '';
-            return `
-            <div class="cmd-row">
-              <div class="cmd-left">
-                <div class="cmd-code">${escapeHtml(ep.host)}:${escapeHtml(ep.port)} <span class="sub">(${escapeHtml(ep.policyName)})</span></div>
-                <div class="cmd-meta">
-                  <span>Compatible CLI: <code class="mono">${escapeHtml(ep.compatibleCliCommands.join(', '))}</code></span>
-                  <span>• Source: ${escapeHtml(ep.source)}</span>
-                </div>
-                ${l7Html}
+            </summary>
+            <div class="egress-fold-body">
+              <div style="color:var(--fg);line-height:1.45;">
+                ${escapeHtml(explanationText)}
               </div>
-              <span class="badge ${ep.access === 'read-only' ? 'neutral' : 'allow'}">${escapeHtml(ep.access)}</span>
-            </div>
-            `;
-          }).join('')}
-        </div>
-      `).join('');
-
-      return l7ComposerHtml + activeHtml + agentsHtml;
-    }
-
-    function renderDelegationTab() {
-      const d = currentReport.delegation;
-      const grantsHtml = d.activeGrants.length > 0
-        ? d.activeGrants.map(g => `
-            <div class="cmd-row">
-              <div class="cmd-left">
-                <div class="cmd-code">${escapeHtml(g.terminal)}</div>
-                <div class="cmd-meta">Agents: ${escapeHtml(g.agents.join(', '))} • Depth: ${g.depth}/${g.maxDepth} • Remaining workers: ${g.remainingWorkers}/${g.maxWorkers}</div>
+              ${l7Html}
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;margin-top:2px;">
+                ${cliChipsHtml}
+                <span class="sub mono">${escapeHtml(ep.sourcePath || ep.source)}</span>
               </div>
-              <span class="badge allow">Active Grant</span>
             </div>
-          `).join('')
-        : `<div class="sub">No active terminal grants currently open for ${escapeHtml(currentReport.selectedWorkspace.name)}.</div>`;
+          </details>
+        `;
+      }).join('');
 
       return `
-        <div class="card">
-          <div class="card-title">
-            <span>In-Sandbox Worker Delegation Policy (${escapeHtml(currentReport.selectedWorkspace.name)})</span>
-            <span class="badge ${d.autoGrantEnabled ? 'allow' : 'neutral'}">${d.autoGrantEnabled ? 'Auto-Grant Enabled' : 'Manual Grant'}</span>
-          </div>
-          <div class="sub">
-            Allowed Worker Agents: <code class="mono">${escapeHtml(d.allowedAgents.join(', '))}</code> •
-            Max Workers: <code class="mono">${d.maxWorkers}</code> •
-            Max Depth: <code class="mono">${d.maxDepth}</code>
-          </div>
-          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Active Coordinator Terminal Grants</div>
-          ${grantsHtml}
+        ${l7ComposerFoldHtml}
+        <div class="controls">
+          <input id="egressSearch" type="text" placeholder="Filter host, CLI command, or script (e.g. github, npm, claude)..." value="${escapeHtml(egressSearch)}" />
+          <button id="expandEgressBtn" class="copy-btn">Expand</button>
+          <button id="collapseEgressBtn" class="copy-btn">Collapse</button>
         </div>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          ${endpointsHtml || '<div class="sub">No matching egress policies found.</div>'}
+        </div>
+      `;
+    }
 
-        <div class="card">
-          <div class="card-title">
-            <span>Allowed In-Sandbox <code class="mono">orca orchestration</code> CLI Commands</span>
-            <span class="badge allow">FIFO Broker</span>
-          </div>
-          ${d.allowedCliCommands.map(c => `
-            <div class="cmd-row">
-              <div class="cmd-left">
-                <div class="cmd-code">${escapeHtml(c.command)}</div>
-                <div class="cmd-meta">${escapeHtml(c.description)}</div>
+    function describeMountPath(mountPath, access, wsName, agentName) {
+      if (mountPath === `/sandbox/${wsName}`) {
+        return {
+          source: 'workspace',
+          explanation: `Project worktree mounted read-write inside the sandbox.`,
+          sourceFile: `${agentName}.json`,
+        };
+      }
+      if (mountPath.startsWith('/sandbox/.')) {
+        return {
+          source: `${agentName}-state`,
+          explanation: `Agent state & configuration directory mounted read-write across turns.`,
+          sourceFile: `${agentName}.json`,
+        };
+      }
+      if (mountPath === '/tmp' || mountPath.startsWith('/tmp/')) {
+        return {
+          source: 'temp-fs',
+          explanation: `Ephemeral scratch directory inside the sandbox.`,
+          sourceFile: `${agentName}.json`,
+        };
+      }
+      return {
+        source: access === 'read-write' ? 'fs-rw' : 'system-ro',
+        explanation: access === 'read-write'
+          ? `Writable Landlock filesystem path.`
+          : `Read-only system path required to execute standard CLI tools and runtimes.`,
+        sourceFile: `${agentName}.json`,
+      };
+    }
+
+    function renderSystemTab() {
+      const agents = currentReport.agents;
+      const a = agents[0];
+      if (!a) {
+        return `<div class="card"><div class="sub">No agent profile found.</div></div>`;
+      }
+      const wsName = currentReport.selectedWorkspace.name;
+
+      const fsEntries = [
+        ...a.filesystemReadWrite.map(p => ({ path: p, access: 'read-write', dot: 'rw' })),
+        ...a.filesystemReadOnly.map(p => ({ path: p, access: 'read-only', dot: 'ro' })),
+      ];
+
+      const fsCardsHtml = fsEntries.map(item => {
+        const key = `fs:${item.access}:${item.path}`;
+        const isOpen = openSystemItems.has(key);
+        const info = describeMountPath(item.path, item.access, wsName, a.agent);
+        return `
+          <details class="egress-fold" data-sys-item="${escapeHtml(key)}" ${isOpen ? 'open' : ''}>
+            <summary>
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="fold-chevron">&#9654;</span>
+                <span class="access-dot ${item.dot}" title="Landlock: ${escapeHtml(item.access)}"></span>
+                <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.path)}</span>
               </div>
-              <button class="copy-btn" data-copy="${escapeHtml(c.command)}">Copy</button>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                <span class="source-pill">&#8984; ${escapeHtml(info.source)}</span>
+              </div>
+            </summary>
+            <div class="egress-fold-body">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+                <span style="color:var(--fg);">${escapeHtml(info.explanation)}</span>
+                <span class="sub mono">${escapeHtml(info.sourceFile)}</span>
+              </div>
             </div>
-          `).join('')}
-          <div class="sub" style="font-weight:600;color:var(--fg);margin-top:4px;">Refused / Blocked CLI Flags Inside Sandbox</div>
-          <div class="chips">
-            ${d.blockedFlags.map(f => `<span class="chip" style="border-color:var(--danger);color:var(--danger);">${escapeHtml(f)}</span>`).join('')}
+          </details>
+        `;
+      }).join('');
+
+      const envCardsHtml = a.credentialPlaceholders.map(envKey => {
+        const key = `env:${envKey}`;
+        const isOpen = openSystemItems.has(key);
+        return `
+          <details class="egress-fold" data-sys-item="${escapeHtml(key)}" ${isOpen ? 'open' : ''}>
+            <summary>
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="fold-chevron">&#9654;</span>
+                <span class="access-dot l7" title="Supervisor-resolved credential placeholder"></span>
+                <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(envKey)}</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                <span class="source-pill">&#8984; openshell:resolve</span>
+              </div>
+            </summary>
+            <div class="egress-fold-body">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+                <span style="color:var(--fg);">Proxy-injected credential placeholder (never readable in plain text inside the sandbox).</span>
+                <span class="sub mono">${escapeHtml(a.providerProfile)}.profile.yaml</span>
+              </div>
+            </div>
+          </details>
+        `;
+      }).join('');
+
+      const binCardsHtml = a.allowedBinaries.map(binPath => {
+        const key = `bin:${binPath}`;
+        const isOpen = openSystemItems.has(key);
+        const baseName = binPath.split('/').pop() || binPath;
+        return `
+          <details class="egress-fold" data-sys-item="${escapeHtml(key)}" ${isOpen ? 'open' : ''}>
+            <summary>
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="fold-chevron">&#9654;</span>
+                <span class="access-dot ro" title="Executable container binary"></span>
+                <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(binPath)}</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                <span class="source-pill">&#8984; ${escapeHtml(baseName)}</span>
+              </div>
+            </summary>
+            <div class="egress-fold-body">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+                <span style="color:var(--fg);">Permitted runtime binary inside <code class="mono">${escapeHtml(a.containerImage)}</code>.</span>
+                <span class="sub mono">${escapeHtml(a.hostWrapper)}</span>
+              </div>
+            </div>
+          </details>
+        `;
+      }).join('');
+
+      return `
+        <details class="app-fold" data-section="sys-fs" ${openSections.has('sys-fs') || !openSections.has('sys-fs-closed') ? 'open' : ''}>
+          <summary>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span class="fold-chevron">&#9654;</span>
+              <span class="access-dot rw"></span>
+              <span>Filesystem (${fsEntries.length})</span>
+            </div>
+            <span class="source-pill">&#8984; landlock</span>
+          </summary>
+          <div class="app-fold-body">
+            ${fsCardsHtml}
           </div>
-        </div>
+        </details>
+
+        <details class="app-fold" data-section="sys-vars" ${openSections.has('sys-vars') || !openSections.has('sys-vars-closed') ? 'open' : ''}>
+          <summary>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span class="fold-chevron">&#9654;</span>
+              <span class="access-dot l7"></span>
+              <span>Variables &amp; Binaries (${a.credentialPlaceholders.length + a.allowedBinaries.length})</span>
+            </div>
+            <span class="source-pill">&#8984; ${escapeHtml(a.providerProfile)}</span>
+          </summary>
+          <div class="app-fold-body">
+            ${envCardsHtml}
+            ${binCardsHtml}
+          </div>
+        </details>
       `;
     }
 
@@ -823,17 +1005,75 @@
       if (!currentReport) return;
       const container = document.getElementById('tabContent');
       if (activeTab === 'cli') container.innerHTML = renderCliTab();
-      else if (activeTab === 'sandbox') container.innerHTML = renderSandboxTab();
-      else container.innerHTML = renderDelegationTab();
+      else if (activeTab === 'egress') container.innerHTML = renderEgressTab();
+      else container.innerHTML = renderSystemTab();
 
       container.querySelectorAll('details.app-fold').forEach(el => {
         el.addEventListener('toggle', () => {
           const app = el.dataset.app;
-          if (!app) return;
-          if (el.open) openApps.add(app);
-          else openApps.delete(app);
+          if (app) {
+            if (el.open) openApps.add(app);
+            else openApps.delete(app);
+          }
+          const sec = el.dataset.section;
+          if (sec) {
+            if (el.open) openSections.add(sec);
+            else openSections.delete(sec);
+          }
         });
       });
+
+      container.querySelectorAll('details.egress-fold').forEach(el => {
+        el.addEventListener('toggle', () => {
+          const key = el.dataset.egress;
+          if (key) {
+            if (el.open) openEgress.add(key);
+            else openEgress.delete(key);
+          }
+          const cliRule = el.dataset.cliRule;
+          if (cliRule) {
+            if (el.open) openCliRules.add(cliRule);
+            else openCliRules.delete(cliRule);
+          }
+          const sysItem = el.dataset.sysItem;
+          if (sysItem) {
+            if (el.open) openSystemItems.add(sysItem);
+            else openSystemItems.delete(sysItem);
+          }
+        });
+      });
+
+      const expandEgressBtn = document.getElementById('expandEgressBtn');
+      if (expandEgressBtn) {
+        expandEgressBtn.addEventListener('click', () => {
+          container.querySelectorAll('details.egress-fold').forEach(el => {
+            el.open = true;
+            if (el.dataset.egress) openEgress.add(el.dataset.egress);
+          });
+        });
+      }
+      const collapseEgressBtn = document.getElementById('collapseEgressBtn');
+      if (collapseEgressBtn) {
+        collapseEgressBtn.addEventListener('click', () => {
+          openEgress.clear();
+          container.querySelectorAll('details.egress-fold').forEach(el => {
+            el.open = false;
+          });
+        });
+      }
+
+      const egressSearchInput = document.getElementById('egressSearch');
+      if (egressSearchInput) {
+        egressSearchInput.addEventListener('input', (e) => {
+          egressSearch = e.target.value;
+          renderActiveTab();
+          const input = document.getElementById('egressSearch');
+          if (input) {
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+          }
+        });
+      }
 
       const expandAllBtn = document.getElementById('expandAllBtn');
       if (expandAllBtn) {
@@ -864,7 +1104,9 @@
           const port = Number(document.getElementById('l7Port').value) || 443;
           const path = document.getElementById('l7Path').value.trim() || '/**';
           const binary = document.getElementById('l7Binary').value.trim() || '*';
-          applyL7PolicyRule({ scope, action, method, host, port, path, binary }, 'l7ComposerStatus');
+          const triggerCommand = document.getElementById('l7TriggerCmd')?.value?.trim() || '';
+          openSections.add('l7-composer');
+          applyL7PolicyRule({ scope, action, method, host, port, path, binary, triggerCommand }, 'l7ComposerStatus');
         });
       }
 

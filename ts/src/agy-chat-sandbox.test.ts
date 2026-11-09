@@ -8,22 +8,22 @@ import {
 
 describe('Antigravity Chat Mode OpenShell Sandbox Helpers', () => {
   test('translateAgyCommandAndCwd maps host workspace paths and subdirectories to container paths', () => {
-    const projectRoot = '/Users/cedric/Projects/safe-orca-setup';
-    const containerRoot = '/sandbox/safe-orca-setup';
+    const projectRoot = '/Users/cedric/Projects/ade-nvidia-openshell-plugin';
+    const containerRoot = '/sandbox/ade-nvidia-openshell-plugin';
 
     const sub = translateAgyCommandAndCwd(
-      'cat /Users/cedric/Projects/safe-orca-setup/orca-plugin/package.json && whoami',
-      '/Users/cedric/Projects/safe-orca-setup/orca-plugin',
+      'cat /Users/cedric/Projects/ade-nvidia-openshell-plugin/orca-plugin/package.json && whoami',
+      '/Users/cedric/Projects/ade-nvidia-openshell-plugin/orca-plugin',
       projectRoot,
       containerRoot
     );
-    expect(sub.containerCwd).toBe('/sandbox/safe-orca-setup/orca-plugin');
-    expect(sub.translatedCommand).toBe('cat /sandbox/safe-orca-setup/orca-plugin/package.json && whoami');
+    expect(sub.containerCwd).toBe('/sandbox/ade-nvidia-openshell-plugin/orca-plugin');
+    expect(sub.translatedCommand).toBe('cat /sandbox/ade-nvidia-openshell-plugin/orca-plugin/package.json && whoami');
   });
 
   test('translateAgyCommandAndCwd falls back to containerRoot when hostCwd is Antigravity skills dir', () => {
-    const projectRoot = '/Users/cedric/Projects/safe-orca-setup';
-    const containerRoot = '/sandbox/safe-orca-setup';
+    const projectRoot = '/Users/cedric/Projects/ade-nvidia-openshell-plugin';
+    const containerRoot = '/sandbox/ade-nvidia-openshell-plugin';
 
     const res = translateAgyCommandAndCwd(
       'whoami',
@@ -31,7 +31,7 @@ describe('Antigravity Chat Mode OpenShell Sandbox Helpers', () => {
       projectRoot,
       containerRoot
     );
-    expect(res.containerCwd).toBe('/sandbox/safe-orca-setup');
+    expect(res.containerCwd).toBe('/sandbox/ade-nvidia-openshell-plugin');
     expect(res.translatedCommand).toBe('whoami');
   });
 
@@ -43,13 +43,13 @@ describe('Antigravity Chat Mode OpenShell Sandbox Helpers', () => {
 
   test('resolveAgyProjectRoot honours AG_HOST_WORKDIR when set', () => {
     const prev = process.env.AG_HOST_WORKDIR;
-    process.env.AG_HOST_WORKDIR = '/Users/cedric/Projects/safe-orca-setup';
+    process.env.AG_HOST_WORKDIR = '/Users/cedric/Projects/ade-nvidia-openshell-plugin';
     try {
       const root = resolveAgyProjectRoot(
         '/Users/cedric/Library/Application Support/orca/antigravity-chat/antigravity-cli/skills',
         0
       );
-      expect(root).toBe('/Users/cedric/Projects/safe-orca-setup');
+      expect(root).toBe('/Users/cedric/Projects/ade-nvidia-openshell-plugin');
     } finally {
       if (prev === undefined) delete process.env.AG_HOST_WORKDIR;
       else process.env.AG_HOST_WORKDIR = prev;
@@ -69,6 +69,7 @@ describe('Antigravity Chat Mode OpenShell Sandbox Helpers', () => {
       method: 'GET',
       path: '/zen',
       binary: '*',
+      commandLine: 'curl -isS --max-time 5 https://api.github.com/zen',
     });
   });
 
@@ -91,6 +92,7 @@ describe('Antigravity Chat Mode OpenShell Sandbox Helpers', () => {
       method: 'POST',
       path: '/post',
       binary: '/usr/bin/curl',
+      commandLine: 'curl -isS -X POST https://httpbin.org/post',
     });
   });
 });
