@@ -3,7 +3,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import type { OpenShellPolicy } from './types.js';
-import { detectProjectRoot, generateSandboxName, logDebug, USER_HOME } from './config.js';
+import {
+  detectProjectRoot,
+  generateSandboxName,
+  getSandboxIdleTimeoutSeconds,
+  isSandboxModeEnabled,
+  logDebug,
+  registerSandboxSession,
+  unregisterSandboxSession,
+  USER_HOME,
+} from './config.js';
 import { discoverAndMergePolicies, mergePolicies, mergeTwoPolicies, parsePolicyFile } from './policy.js';
 import { OpenShellSandbox } from './sandbox.js';
 import { applyWorkspaceWriteScope, getExtraProviderNames, getWorkspaceWritePaths } from './sandbox-scope.js';
@@ -20,6 +29,7 @@ export interface AgyChatSandboxState {
   daemonPid: number;
   createdAt: string;
   ready: boolean;
+  hibernated?: boolean;
 }
 
 function shellQuote(value: string): string {
@@ -31,6 +41,67 @@ function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeAtomicState(statePath: string, state: AgyChatSandboxState): void {
+  const tmpStatePath = `${statePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  fs.renameSync(tmpStatePath, statePath);
+}
+
+export function touchAgyActivity(sessionDir: string, nowMs = Date.now()): void {
+  try {
+    fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(sessionDir, 'activity.stamp'), String(nowMs), { mode: 0o600 });
+  } catch {}
+}
+
+export function readLastAgyActivity(sessionDir: string): number {
+  try {
+    const stampPath = path.join(sessionDir, 'activity.stamp');
+    if (!fs.existsSync(stampPath)) return 0;
+    const val = Number(fs.readFileSync(stampPath, 'utf8').trim());
+    return Number.isFinite(val) && val > 0 ? val : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function acquireAgyExecLock(sessionDir: string, pid = process.pid): () => void {
+  const execsDir = path.join(sessionDir, 'active-execs');
+  const lockFile = path.join(execsDir, `${pid}-${Date.now()}.lock`);
+  try {
+    fs.mkdirSync(execsDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(lockFile, String(pid), { mode: 0o600 });
+  } catch {}
+  return () => {
+    try {
+      fs.unlinkSync(lockFile);
+    } catch {}
+  };
+}
+
+export function hasActiveAgyExecs(sessionDir: string): boolean {
+  const execsDir = path.join(sessionDir, 'active-execs');
+  if (!fs.existsSync(execsDir)) return false;
+  try {
+    let active = false;
+    for (const entry of fs.readdirSync(execsDir)) {
+      if (!entry.endsWith('.lock')) continue;
+      const fullPath = path.join(execsDir, entry);
+      try {
+        const lockPid = Number(fs.readFileSync(fullPath, 'utf8').trim());
+        if (isPidAlive(lockPid)) {
+          active = true;
+        } else {
+          try { fs.unlinkSync(fullPath); } catch {}
+        }
+      } catch {}
+    }
+    return active;
   } catch {
     return false;
   }
@@ -394,7 +465,7 @@ export async function runAgyChatDaemon(
           '#!/usr/bin/env python3',
           'import json, os, sys, time',
           'args = sys.argv[1:]',
-          'req = {"scope": "session", "host": "", "port": 443, "method": "GET", "path": "/**", "binary": "*"}',
+          `req = {"scope": "session", "sandboxName": ${JSON.stringify(sandboxName)}, "host": "", "port": 443, "method": "GET", "path": "/**", "binary": "*"}`,
           'i = 0',
           'while i < len(args):',
           '    a = args[i]',
@@ -423,6 +494,8 @@ export async function runAgyChatDaemon(
 
     fs.writeFileSync(path.join(sessionDir, 'host-sync.stamp'), '');
 
+    touchAgyActivity(sessionDir);
+
     const state: AgyChatSandboxState = {
       sandboxName,
       projectRoot: resolvedRoot,
@@ -435,11 +508,20 @@ export async function runAgyChatDaemon(
       daemonPid: process.pid,
       createdAt: new Date().toISOString(),
       ready: true,
+      hibernated: false,
     };
 
-    const tmpStatePath = `${statePath}.tmp`;
-    fs.writeFileSync(tmpStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
-    fs.renameSync(tmpStatePath, statePath);
+    writeAtomicState(statePath, state);
+    const sessionBase = path.basename(sessionDir);
+    registerSandboxSession({
+      sandboxName,
+      agent: 'antigravity',
+      workspacePath: resolvedRoot,
+      agentSessionId:
+        process.env.ORCA_AGENT_SESSION_ID ||
+        (sessionBase.startsWith('antigravity_') ? sessionBase : undefined),
+      pid: process.pid,
+    });
   } catch (err) {
     logDebug(`Failed to start Antigravity Chat Mode sandbox ${sandboxName}: ${err}`);
     if (sandbox) sandbox.delete();
@@ -456,20 +538,38 @@ export async function runAgyChatDaemon(
   const cleanup = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    unregisterSandboxSession(sandboxName);
+    let currentState: AgyChatSandboxState | null = null;
     try {
       if (fs.existsSync(statePath)) {
-        const state = JSON.parse(fs.readFileSync(statePath, 'utf8')) as AgyChatSandboxState;
-        syncSandboxDeltaToHost(state, sessionDir);
+        currentState = JSON.parse(fs.readFileSync(statePath, 'utf8')) as AgyChatSandboxState;
       }
     } catch {}
-    try {
-      execFileSync(
-        'ssh',
-        ['-S', sshControlPath, '-F', sshConfigPath, '-O', 'exit', sshHost],
-        { stdio: ['ignore', 'ignore', 'ignore'], timeout: 3000 }
-      );
-    } catch {}
+    if (currentState && !currentState.hibernated) {
+      try {
+        syncSandboxDeltaToHost(currentState, sessionDir);
+      } catch {}
+      try {
+        execFileSync(
+          'ssh',
+          ['-S', sshControlPath, '-F', sshConfigPath, '-O', 'exit', currentState.sshHost || sshHost],
+          { stdio: ['ignore', 'ignore', 'ignore'], timeout: 3000 }
+        );
+      } catch {}
+    }
     sandbox?.delete();
+    try {
+      const sessFile =
+        process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE ||
+        path.join(USER_HOME, '.config', 'orca-openshell', 'session-egress.json');
+      if (fs.existsSync(sessFile)) {
+        const parsed = JSON.parse(fs.readFileSync(sessFile, 'utf8')) as { entries?: Array<{ sandboxName?: string }> };
+        if (Array.isArray(parsed?.entries)) {
+          const filtered = parsed.entries.filter(e => e.sandboxName !== sandboxName);
+          fs.writeFileSync(sessFile, JSON.stringify({ entries: filtered }, null, 2) + '\n', 'utf8');
+        }
+      }
+    } catch {}
     try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
   };
 
@@ -506,6 +606,7 @@ export async function runAgyChatDaemon(
               '--path', req.path || '/**',
               '--binary', req.binary || '*',
               '--sandbox', sandboxName,
+              '--project-root', resolvedRoot,
             ]);
           }
         } catch {
@@ -518,18 +619,179 @@ export async function runAgyChatDaemon(
     } catch {}
   };
 
+  const hibernateLockPath = path.join(sessionDir, 'hibernating.lock');
+  const wakeLockPath = path.join(sessionDir, 'waking.lock');
+
+  const sessionBaseForIdle = path.basename(sessionDir);
+  const resolvedAgentSessionId =
+    process.env.ORCA_AGENT_SESSION_ID ||
+    (sessionBaseForIdle.startsWith('antigravity_') ? sessionBaseForIdle : undefined);
+
+  const tryIdleHibernate = () => {
+    if (shuttingDown || !sandbox) return;
+    const idleTimeoutSec = getSandboxIdleTimeoutSeconds(USER_HOME, {
+      sandboxName,
+      agentSessionId: resolvedAgentSessionId,
+    });
+    if (idleTimeoutSec <= 0) return;
+
+    let currentState: AgyChatSandboxState | null = null;
+    try {
+      if (fs.existsSync(statePath)) {
+        currentState = JSON.parse(fs.readFileSync(statePath, 'utf8')) as AgyChatSandboxState;
+      }
+    } catch {}
+    if (!currentState || !currentState.ready || currentState.hibernated) return;
+    if (hasActiveAgyExecs(sessionDir)) return;
+    if (fs.existsSync(wakeLockPath)) {
+      try {
+        const wakePid = Number(fs.readFileSync(wakeLockPath, 'utf8').trim());
+        if (isPidAlive(wakePid)) return;
+      } catch {}
+    }
+
+    const lastActivity = readLastAgyActivity(sessionDir);
+    if (!lastActivity || Date.now() - lastActivity < idleTimeoutSec * 1000) return;
+
+    try {
+      fs.writeFileSync(hibernateLockPath, String(process.pid), { mode: 0o600 });
+      if (hasActiveAgyExecs(sessionDir) || Date.now() - readLastAgyActivity(sessionDir) < idleTimeoutSec * 1000) {
+        return;
+      }
+      logDebug(`Idle timeout (${idleTimeoutSec}s) reached for Antigravity sandbox ${sandboxName}; stopping container`);
+      try {
+        syncSandboxDeltaToHost(currentState, sessionDir);
+      } catch {}
+      try {
+        execFileSync(
+          'ssh',
+          ['-S', currentState.sshControlPath, '-F', currentState.sshConfigPath, '-O', 'exit', currentState.sshHost],
+          { stdio: ['ignore', 'ignore', 'ignore'], timeout: 3000 }
+        );
+      } catch {}
+      if (sandbox.stop()) {
+        writeAtomicState(statePath, { ...currentState, hibernated: true });
+      }
+    } finally {
+      try { fs.unlinkSync(hibernateLockPath); } catch {}
+    }
+  };
+
   await new Promise<void>((resolve) => {
     const timer = setInterval(() => {
-      checkL7RequestQueue();
+      let hibernatedNow = false;
+      try {
+        if (fs.existsSync(statePath)) {
+          const st = JSON.parse(fs.readFileSync(statePath, 'utf8')) as AgyChatSandboxState;
+          hibernatedNow = Boolean(st.hibernated);
+        }
+      } catch {}
+      if (!hibernatedNow) {
+        checkL7RequestQueue();
+      }
       if (harnessPid > 1 && !isPidAlive(harnessPid)) {
         clearInterval(timer);
         cleanup();
         resolve();
+        return;
       }
+      tryIdleHibernate();
     }, 1000);
   });
 
   return 0;
+}
+
+function wakeHibernatedAgySandbox(
+  sessionDir: string,
+  statePath: string,
+  state: AgyChatSandboxState
+): AgyChatSandboxState | 'deleted' | null {
+  const wakeLockPath = path.join(sessionDir, 'waking.lock');
+  if (fs.existsSync(wakeLockPath)) {
+    try {
+      const existingWakePid = Number(fs.readFileSync(wakeLockPath, 'utf8').trim());
+      if (isPidAlive(existingWakePid)) {
+        return null; // Another process is currently waking this sandbox
+      }
+    } catch {}
+  }
+
+  fs.writeFileSync(wakeLockPath, String(process.pid), { mode: 0o600 });
+  try {
+    touchAgyActivity(sessionDir);
+    const sb = new OpenShellSandbox(state.sandboxName);
+    const phase = sb.getPhase();
+    if (phase === null) {
+      logDebug(`Sandbox ${state.sandboxName} was deleted externally; recreating clean session`);
+      if (isPidAlive(state.daemonPid)) {
+        try { process.kill(state.daemonPid, 'SIGTERM'); } catch {}
+      }
+      try { fs.unlinkSync(statePath); } catch {}
+      return 'deleted';
+    }
+
+    if (phase !== 'Ready') {
+      logDebug(`Waking stopped Antigravity sandbox ${state.sandboxName} (phase=${phase})`);
+      if (!sb.start()) {
+        throw new Error(`Failed to restart OpenShell sandbox ${state.sandboxName}`);
+      }
+    }
+
+    let sshHost = state.sshHost;
+    try {
+      const sshConfigRaw = execFileSync('openshell', ['sandbox', 'ssh-config', state.sandboxName], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10000,
+      });
+      fs.writeFileSync(state.sshConfigPath, sshConfigRaw, { mode: 0o600 });
+      const hostMatch = sshConfigRaw.match(/^\s*Host\s+(\S+)/m);
+      if (hostMatch) sshHost = hostMatch[1];
+    } catch {}
+
+    try { fs.unlinkSync(state.sshControlPath); } catch {}
+    execFileSync(
+      'ssh',
+      [
+        '-M',
+        '-N',
+        '-f',
+        '-o', 'ControlPersist=yes',
+        '-o', 'ServerAliveInterval=30',
+        '-S', state.sshControlPath,
+        '-F', state.sshConfigPath,
+        sshHost,
+      ],
+      { stdio: ['ignore', 'ignore', 'ignore'], timeout: 15000 }
+    );
+
+    try {
+      execFileSync(
+        'ssh',
+        [
+          '-T',
+          '-S', state.sshControlPath,
+          '-F', state.sshConfigPath,
+          sshHost,
+          'test -f /tmp/.orca_sync_marker || touch /tmp/.orca_sync_marker',
+        ],
+        { stdio: ['ignore', 'ignore', 'ignore'], timeout: 8000 }
+      );
+    } catch {}
+
+    const updatedState: AgyChatSandboxState = {
+      ...state,
+      sshHost,
+      ready: true,
+      hibernated: false,
+    };
+    writeAtomicState(statePath, updatedState);
+    touchAgyActivity(sessionDir);
+    return updatedState;
+  } finally {
+    try { fs.unlinkSync(wakeLockPath); } catch {}
+  }
 }
 
 function ensureAgySandboxReady(
@@ -539,22 +801,54 @@ function ensureAgySandboxReady(
 ): AgyChatSandboxState {
   const statePath = path.join(sessionDir, 'state.json');
   const lockPath = path.join(sessionDir, 'creating.lock');
-
-  const readValidState = (): AgyChatSandboxState | null => {
-    if (!fs.existsSync(statePath)) return null;
-    try {
-      const state = JSON.parse(fs.readFileSync(statePath, 'utf8')) as AgyChatSandboxState;
-      if (state.ready && isSshControlAlive(state)) {
-        return state;
-      }
-    } catch {}
-    return null;
-  };
-
-  const existing = readValidState();
-  if (existing) return existing;
+  const hibernateLockPath = path.join(sessionDir, 'hibernating.lock');
 
   fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+  touchAgyActivity(sessionDir);
+
+  const waitDeadline = Date.now() + 30000;
+  while (fs.existsSync(hibernateLockPath) && Date.now() < waitDeadline) {
+    try {
+      const hPid = Number(fs.readFileSync(hibernateLockPath, 'utf8').trim());
+      if (!isPidAlive(hPid)) break;
+    } catch {
+      break;
+    }
+    execFileSync('sleep', ['0.15']);
+  }
+
+  const readStateRaw = (): AgyChatSandboxState | null => {
+    if (!fs.existsSync(statePath)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(statePath, 'utf8')) as AgyChatSandboxState;
+    } catch {
+      return null;
+    }
+  };
+
+  const existingRaw = readStateRaw();
+  if (existingRaw?.ready) {
+    if (!existingRaw.hibernated && isSshControlAlive(existingRaw)) {
+      return existingRaw;
+    }
+    if (isPidAlive(existingRaw.daemonPid)) {
+      const woken = wakeHibernatedAgySandbox(sessionDir, statePath, existingRaw);
+      if (woken && woken !== 'deleted') {
+        return woken;
+      }
+      if (woken === null) {
+        const wakeWaitDeadline = Date.now() + 60000;
+        while (Date.now() < wakeWaitDeadline) {
+          const st = readStateRaw();
+          if (st?.ready && !st.hibernated && isSshControlAlive(st)) {
+            return st;
+          }
+          execFileSync('sleep', ['0.15']);
+        }
+      }
+    }
+  }
+
   let shouldSpawn = true;
   if (fs.existsSync(lockPath)) {
     try {
@@ -584,8 +878,8 @@ function ensureAgySandboxReady(
 
   const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {
-    const readyState = readValidState();
-    if (readyState) return readyState;
+    const st = readStateRaw();
+    if (st?.ready && !st.hibernated && isSshControlAlive(st)) return st;
     execFileSync('sleep', ['0.15']);
   }
 
@@ -700,9 +994,9 @@ function promptUserForL7Approval(
     return 'deny';
   }
 
-  const optSession = '1. Allow for this session only (Live hot-reload)';
-  const optWorkspace = '2. Allow and save for this project (.agents/policies/l7-custom.json)';
-  const optGlobal = '3. Allow in general for all projects (Global policy)';
+  const optSession = '1. Allow temporarily (This session - tagged Temporary)';
+  const optWorkspace = '2. Allow (Add to project rules: .agents/policies/l7-custom.json)';
+  const optGlobal = '3. Allow globally (All projects)';
   const optDeny = '4. Keep blocked (Deny)';
 
   const promptText =
@@ -763,6 +1057,20 @@ async function runRemoteSshCaptured(
   });
 }
 
+function resolveRealHostShell(shellName: string): string {
+  const base = path.basename(shellName) === 'bash' ? 'bash' : 'zsh';
+  const user = process.env.USER || 'cedric';
+  const candidates = [
+    `/etc/profiles/per-user/${user}/bin/${base}`,
+    `/run/current-system/sw/bin/${base}`,
+    `/bin/${base}`,
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return `/bin/${base}`;
+}
+
 export async function runAgyChatExec(shellName: string, commandLine: string): Promise<number> {
   process.env.AG_SANDBOX_HOST_INTERNAL = '1';
   delete process.env.ANTIGRAVITY_HARNESS_PATH;
@@ -782,110 +1090,134 @@ export async function runAgyChatExec(shellName: string, commandLine: string): Pr
   const hostCwd = process.cwd();
   const projectRoot = resolveAgyProjectRoot(hostCwd, harnessPid);
 
-  const state = ensureAgySandboxReady(sessionDir, projectRoot, harnessPid);
-  syncHostDeltaToSandbox(state, sessionDir);
-
-  const { translatedCommand, containerCwd } = translateAgyCommandAndCwd(
-    commandLine,
-    hostCwd,
-    state.projectRoot,
-    state.containerRoot
-  );
-
-  const remoteScript = [
-    `cd ${shellQuote(containerCwd)} 2>/dev/null || cd ${shellQuote(state.containerRoot)}`,
-    `export HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu`,
-    `export TERM=dumb PAGER=cat GIT_PAGER=cat`,
-    `export PATH="/sandbox/.orca-delegate/bin:/usr/local/go/bin:/home/ubuntu/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"`,
-    shellName === 'zsh'
-      ? `if command -v zsh >/dev/null 2>&1; then zsh -c ${shellQuote(translatedCommand)}; else bash -c ${shellQuote(translatedCommand)}; fi`
-      : `bash -c ${shellQuote(translatedCommand)}`,
-  ].join('\n');
-
-  let result = await runRemoteSshCaptured(state, remoteScript);
-  const blocked = detectBlockedEgress(commandLine, result.exitCode, result.stdout, result.stderr);
-
-  if (blocked) {
-    const decision = promptUserForL7Approval(blocked, state.sandboxName);
-    if (decision !== 'deny') {
-      await runAgyPolicyAdd([
-        '--scope', decision,
-        '--host', blocked.host,
-        '--port', String(blocked.port),
-        '--method', blocked.method,
-        '--path', blocked.path,
-        '--binary', blocked.binary || '*',
-        '--sandbox', state.sandboxName,
-        ...(blocked.commandLine ? ['--trigger-command', blocked.commandLine] : []),
-      ]);
-
-      // runAgyPolicyAdd uses `openshell policy update --wait`, so the policy revision is already loaded
-      for (let attempt = 0; attempt < 4; attempt++) {
-        if (attempt > 0) execFileSync('sleep', ['1']);
-        result = await runRemoteSshCaptured(state, remoteScript);
-        const stillBlocked = detectBlockedEgress(
-          commandLine,
-          result.exitCode,
-          result.stdout,
-          result.stderr
-        );
-        if (!stillBlocked) break;
-      }
-    } else {
-      if (result.stdout) process.stdout.write(result.stdout);
-      if (result.stderr) process.stderr.write(result.stderr);
-      process.stderr.write(
-        `\n[OpenShell Egress Denied by User] Target: ${blocked.method} https://${blocked.host}:${blocked.port}${blocked.path} (sandbox: ${state.sandboxName})\n`
-      );
-      syncSandboxDeltaToHost(state, sessionDir);
-      return result.exitCode !== 0 ? result.exitCode : 1;
-    }
+  if (!isSandboxModeEnabled(USER_HOME, projectRoot)) {
+    const realShell = resolveRealHostShell(shellName);
+    logDebug(`Sandbox mode disabled for ${projectRoot} - executing Antigravity Chat command on host via ${realShell}`);
+    return new Promise<number>((resolve) => {
+      const child = spawn(realShell, ['-c', commandLine], {
+        stdio: 'inherit',
+        env: process.env,
+      });
+      child.on('close', (code, signal) => {
+        resolve(code ?? (signal ? 128 + (os.constants.signals[signal] ?? 1) : 0));
+      });
+      child.on('error', () => resolve(1));
+    });
   }
 
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
-  const exitCode = result.exitCode;
+  const releaseExecLock = acquireAgyExecLock(sessionDir);
+  touchAgyActivity(sessionDir);
+  try {
+    const state = ensureAgySandboxReady(sessionDir, projectRoot, harnessPid);
+    syncHostDeltaToSandbox(state, sessionDir);
 
-  syncSandboxDeltaToHost(state, sessionDir);
+    const { translatedCommand, containerCwd } = translateAgyCommandAndCwd(
+      commandLine,
+      hostCwd,
+      state.projectRoot,
+      state.containerRoot
+    );
 
-  const reqDir = path.join(state.projectRoot, '.orca-openshell-l7-requests');
-  if (fs.existsSync(reqDir)) {
-    try {
-      const files = fs.readdirSync(reqDir).filter(f => f.endsWith('.json')).sort();
-      for (const file of files) {
-        const fullPath = path.join(reqDir, file);
-        try {
-          const req = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as {
-            scope?: 'session' | 'workspace' | 'global';
-            host?: string;
-            port?: number;
-            method?: string;
-            path?: string;
-            binary?: string;
-          };
-          fs.unlinkSync(fullPath);
-          if (req.host) {
-            await runAgyPolicyAdd([
-              '--scope', req.scope || 'session',
-              '--host', req.host,
-              '--port', String(req.port || 443),
-              '--method', req.method || 'GET',
-              '--path', req.path || '/**',
-              '--binary', req.binary || '*',
-              '--sandbox', state.sandboxName,
-            ]);
-          }
-        } catch {
-          try { fs.unlinkSync(fullPath); } catch {}
+    const remoteScript = [
+      `cd ${shellQuote(containerCwd)} 2>/dev/null || cd ${shellQuote(state.containerRoot)}`,
+      `export HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu`,
+      `export TERM=dumb PAGER=cat GIT_PAGER=cat`,
+      `export PATH="/sandbox/.orca-delegate/bin:/usr/local/go/bin:/home/ubuntu/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"`,
+      shellName === 'zsh'
+        ? `if command -v zsh >/dev/null 2>&1; then zsh -c ${shellQuote(translatedCommand)}; else bash -c ${shellQuote(translatedCommand)}; fi`
+        : `bash -c ${shellQuote(translatedCommand)}`,
+    ].join('\n');
+
+    let result = await runRemoteSshCaptured(state, remoteScript);
+    const blocked = detectBlockedEgress(commandLine, result.exitCode, result.stdout, result.stderr);
+
+    if (blocked) {
+      const decision = promptUserForL7Approval(blocked, state.sandboxName);
+      if (decision !== 'deny') {
+        await runAgyPolicyAdd([
+          '--scope', decision,
+          '--host', blocked.host,
+          '--port', String(blocked.port),
+          '--method', blocked.method,
+          '--path', blocked.path,
+          '--binary', blocked.binary || '*',
+          '--sandbox', state.sandboxName,
+          '--project-root', state.projectRoot,
+          ...(blocked.commandLine ? ['--trigger-command', blocked.commandLine] : []),
+        ]);
+
+        // runAgyPolicyAdd uses `openshell policy update --wait`, so the policy revision is already loaded
+        for (let attempt = 0; attempt < 4; attempt++) {
+          if (attempt > 0) execFileSync('sleep', ['1']);
+          result = await runRemoteSshCaptured(state, remoteScript);
+          const stillBlocked = detectBlockedEgress(
+            commandLine,
+            result.exitCode,
+            result.stdout,
+            result.stderr
+          );
+          if (!stillBlocked) break;
         }
+      } else {
+        if (result.stdout) process.stdout.write(result.stdout);
+        if (result.stderr) process.stderr.write(result.stderr);
+        process.stderr.write(
+          `\n[OpenShell Egress Denied by User] Target: ${blocked.method} https://${blocked.host}:${blocked.port}${blocked.path} (sandbox: ${state.sandboxName})\n`
+        );
+        syncSandboxDeltaToHost(state, sessionDir);
+        return result.exitCode !== 0 ? result.exitCode : 1;
       }
-      if (fs.readdirSync(reqDir).length === 0) {
-        try { fs.rmdirSync(reqDir); } catch {}
-      }
-    } catch {}
-  }
+    }
 
-  return exitCode;
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    const exitCode = result.exitCode;
+
+    syncSandboxDeltaToHost(state, sessionDir);
+
+    const reqDir = path.join(state.projectRoot, '.orca-openshell-l7-requests');
+    if (fs.existsSync(reqDir)) {
+      try {
+        const files = fs.readdirSync(reqDir).filter(f => f.endsWith('.json')).sort();
+        for (const file of files) {
+          const fullPath = path.join(reqDir, file);
+          try {
+            const req = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as {
+              scope?: 'session' | 'workspace' | 'global';
+              host?: string;
+              port?: number;
+              method?: string;
+              path?: string;
+              binary?: string;
+            };
+            fs.unlinkSync(fullPath);
+            if (req.host) {
+              await runAgyPolicyAdd([
+                '--scope', req.scope || 'session',
+                '--host', req.host,
+                '--port', String(req.port || 443),
+                '--method', req.method || 'GET',
+                '--path', req.path || '/**',
+                '--binary', req.binary || '*',
+                '--sandbox', state.sandboxName,
+                '--project-root', state.projectRoot,
+              ]);
+            }
+          } catch {
+            try { fs.unlinkSync(fullPath); } catch {}
+          }
+        }
+        if (fs.readdirSync(reqDir).length === 0) {
+          try { fs.rmdirSync(reqDir); } catch {}
+        }
+      } catch {}
+    }
+
+    return exitCode;
+  } finally {
+    touchAgyActivity(sessionDir);
+    releaseExecLock();
+  }
 }
 
 export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
@@ -901,6 +1233,7 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
   let sandboxName = '';
   let agent = 'antigravity';
   let triggerCommand = '';
+  let explicitProjectRoot = '';
 
   for (let i = 0; i < rawArgs.length; i++) {
     const arg = rawArgs[i];
@@ -913,6 +1246,7 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
     else if (arg === '--sandbox' && rawArgs[i + 1]) sandboxName = rawArgs[++i];
     else if (arg === '--agent' && rawArgs[i + 1]) agent = rawArgs[++i];
     else if (arg === '--trigger-command' && rawArgs[i + 1]) triggerCommand = rawArgs[++i];
+    else if (arg === '--project-root' && rawArgs[i + 1]) explicitProjectRoot = rawArgs[++i];
   }
 
   if (!host) {
@@ -926,7 +1260,14 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
     binary === '*'
       ? ['/usr/bin/curl', '/usr/bin/git', '/usr/local/bin/node', '/usr/bin/python3', '/usr/bin/gh']
       : [binary];
-  const projectRoot = resolveAgyProjectRoot(process.cwd(), process.ppid);
+  const projectRoot =
+    explicitProjectRoot && fs.existsSync(explicitProjectRoot)
+      ? detectProjectRoot(explicitProjectRoot)
+      : resolveAgyProjectRoot(process.cwd(), Number(process.env.AG_HARNESS_PID || process.ppid));
+
+  const sessEgressFile =
+    process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE ||
+    path.join(USER_HOME, '.config', 'orca-openshell', 'session-egress.json');
 
   if (scope === 'workspace' || scope === 'global') {
     const targetFile =
@@ -969,6 +1310,21 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
     doc.network_policies[ruleName] = existingPol;
     fs.writeFileSync(targetFile, JSON.stringify(doc, null, 2) + '\n', 'utf8');
     console.log(`Saved persistent L7 rule (${scope}) to ${targetFile}`);
+
+    // Remove any matching temporary rule now that it is saved permanently
+    try {
+      if (fs.existsSync(sessEgressFile)) {
+        const parsed = JSON.parse(fs.readFileSync(sessEgressFile, 'utf8')) as { entries?: any[] };
+        if (Array.isArray(parsed?.entries)) {
+          const filtered = parsed.entries.filter(
+            e => !(e?.workspacePath === projectRoot && String(e?.host || '').toLowerCase() === host.toLowerCase() && Number(e?.port || 443) === port)
+          );
+          if (filtered.length !== parsed.entries.length) {
+            fs.writeFileSync(sessEgressFile, JSON.stringify({ entries: filtered }, null, 2) + '\n', 'utf8');
+          }
+        }
+      }
+    } catch {}
   }
 
   const targetSandboxes: string[] = [];
@@ -1028,6 +1384,47 @@ export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
       console.error(`Failed to update sandbox ${sb}: ${err}`);
       return 1;
     }
+  }
+
+  if (scope === 'session') {
+    try {
+      fs.mkdirSync(path.dirname(sessEgressFile), { recursive: true });
+      let entries: any[] = [];
+      if (fs.existsSync(sessEgressFile)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(sessEgressFile, 'utf8')) as { entries?: any[] };
+          if (Array.isArray(parsed?.entries)) entries = parsed.entries;
+        } catch {}
+      }
+      const normAgent = agent === 'claude' || agent === 'codex' ? agent : 'antigravity';
+      const entry = {
+        sandboxName: targetSandboxes[0] || sandboxName || undefined,
+        workspacePath: projectRoot,
+        agent: normAgent,
+        ruleName,
+        host,
+        port,
+        action: 'allow' as const,
+        method,
+        path: normalizedPath,
+        binary,
+        ...(triggerCommand?.trim() ? { triggerCommand: triggerCommand.trim() } : {}),
+        createdAt: new Date().toISOString(),
+      };
+      const idx = entries.findIndex(
+        e =>
+          (e?.sandboxName || '') === (entry.sandboxName || '') &&
+          e?.workspacePath === projectRoot &&
+          e?.agent === normAgent &&
+          String(e?.host || '').toLowerCase() === host.toLowerCase() &&
+          Number(e?.port || 443) === port &&
+          e?.method === method &&
+          e?.path === normalizedPath
+      );
+      if (idx >= 0) entries[idx] = { ...entries[idx], ...entry };
+      else entries.push(entry);
+      fs.writeFileSync(sessEgressFile, JSON.stringify({ entries }, null, 2) + '\n', 'utf8');
+    } catch {}
   }
 
   return 0;

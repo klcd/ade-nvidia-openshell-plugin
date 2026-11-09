@@ -378,6 +378,67 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .sandbox-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .sandbox-toggle:hover {
+    background: var(--input);
+  }
+  .sandbox-toggle[aria-checked="true"] {
+    border-color: rgba(46, 160, 67, 0.45);
+  }
+  .sandbox-toggle[aria-checked="false"] {
+    border-color: rgba(210, 153, 34, 0.45);
+    color: var(--muted-fg);
+  }
+  .toggle-track {
+    position: relative;
+    width: 26px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--border);
+    transition: background 0.15s ease;
+    flex-shrink: 0;
+  }
+  .sandbox-toggle[aria-checked="true"] .toggle-track {
+    background: var(--success);
+  }
+  .toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ffffff;
+    transition: transform 0.15s ease;
+  }
+  .sandbox-toggle[aria-checked="true"] .toggle-thumb {
+    transform: translateX(12px);
+  }
+  .bypass-notice {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--warn-bg);
+    border: 1px solid rgba(210, 153, 34, 0.35);
+    color: var(--fg);
+    font-size: 11px;
+  }
 </style>
 </head>
 <body>
@@ -388,7 +449,24 @@
           <span>OpenShell Policies</span>
           <span id="sandboxBadge" class="badge neutral">Loading...</span>
         </div>
-        <button id="refreshBtn" title="Reload active project &amp; agent policies">Refresh</button>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button
+            id="sandboxToggleBtn"
+            type="button"
+            role="switch"
+            aria-checked="true"
+            class="sandbox-toggle"
+            title="Activate or deactivate OpenShell sandboxing for agent launches and chat commands"
+          >
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <span id="sandboxToggleLabel">Sandbox</span>
+          </button>
+          <button id="refreshBtn" title="Reload active project &amp; agent policies">Refresh</button>
+        </div>
+      </div>
+      <div id="bypassNotice" class="bypass-notice" style="display:none;">
+        <span class="access-dot l7" title="Host Mode"></span>
+        <span id="bypassNoticeText">Sandboxing deactivated for this worktree &mdash; new agent tabs &amp; chat commands run directly on host.</span>
       </div>
       <div id="contextBanner" class="grid-2" style="margin-top:2px;">
         <div class="stat-box" id="projectStatBox" style="flex-direction:row;justify-content:space-between;align-items:center;padding:7px 10px;">
@@ -396,7 +474,7 @@
             <span class="sub" style="font-size:10px;">Project</span>
             <strong id="projectLabel" class="mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Detecting...</strong>
           </div>
-          <span id="branchBadge" class="badge neutral">—</span>
+          <span id="branchBadge" class="badge neutral">&mdash;</span>
         </div>
         <div class="stat-box" style="flex-direction:row;justify-content:space-between;align-items:center;padding:7px 10px;">
           <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
@@ -434,6 +512,7 @@
     let activeTab = 'cli';
     let searchFilter = '';
     let actionFilter = 'all';
+    let togglingSandbox = false;
     const openApps = new Set();
     const openEgress = new Set();
     const openSystemItems = new Set();
@@ -457,17 +536,32 @@
       } catch {}
     }
 
+    function endpointsSignature(rep) {
+      const eps = rep?.agents?.[0]?.endpoints || [];
+      return eps.map(e => `${e.host}:${e.port}:${e.ruleScope || ''}:${(e.l7Rules || []).length}`).join('|');
+    }
+
+    function sandboxesSignature(rep) {
+      const sbs = rep?.activeSandboxes || [];
+      return sbs.map(s => `${s.name}:${s.phase || ''}`).join('|');
+    }
+
     async function loadReport() {
       try {
         const res = await window.orca.plugin.request('getPolicyReport', {});
         const changedContext =
           !currentReport ||
+          currentReport.sandboxEnabled !== res.sandboxEnabled ||
+          currentReport.sandboxIdleTimeoutSeconds !== res.sandboxIdleTimeoutSeconds ||
           currentReport.selectedWorkspace.path !== res.selectedWorkspace.path ||
           currentReport.currentAgent !== res.currentAgent ||
-          currentReport.activeSandboxes.length !== res.activeSandboxes.length;
+          sandboxesSignature(currentReport) !== sandboxesSignature(res) ||
+          endpointsSignature(currentReport) !== endpointsSignature(res);
         currentReport = res;
         renderHeader();
-        if (changedContext || (!document.getElementById('ruleSearch') && !document.getElementById('egressSearch') && activeTab !== 'system')) {
+        const activeElId = document.activeElement?.id || '';
+        const isTypingInFilter = activeElId === 'ruleSearch' || activeElId === 'egressSearch';
+        if ((changedContext && !isTypingInFilter) || (!document.getElementById('ruleSearch') && !document.getElementById('egressSearch') && activeTab !== 'system')) {
           renderActiveTab();
         }
         const cmd = document.getElementById('cmdInput').value.trim();
@@ -478,16 +572,77 @@
       }
     }
 
+    async function toggleSandboxMode() {
+      if (!currentReport || togglingSandbox) return;
+      togglingSandbox = true;
+      const nextEnabled = currentReport.sandboxEnabled === false;
+      const toggleBtn = document.getElementById('sandboxToggleBtn');
+      if (toggleBtn) toggleBtn.disabled = true;
+      try {
+        const res = await window.orca.plugin.request('setSandboxMode', {
+          enabled: nextEnabled,
+          workspacePath: currentReport.selectedWorkspace?.path,
+          workspaceId: currentReport.selectedWorkspace?.id,
+          agent: currentReport.currentAgent,
+        });
+        currentReport = res;
+        renderHeader();
+        renderActiveTab();
+        const cmd = document.getElementById('cmdInput').value.trim();
+        if (cmd) await runCommandCheck(cmd);
+      } catch {} finally {
+        togglingSandbox = false;
+        if (toggleBtn) toggleBtn.disabled = false;
+      }
+    }
+
     function renderHeader() {
       if (!currentReport) return;
-      const sbCount = currentReport.activeSandboxes.length;
-      const badge = document.getElementById('sandboxBadge');
-      badge.className = 'badge ' + (sbCount > 0 ? 'allow' : 'neutral');
-      badge.textContent = sbCount > 0
-        ? `${sbCount} Sandbox${sbCount === 1 ? '' : 'es'}`
-        : 'Enforced';
-
       const ws = currentReport.selectedWorkspace;
+      const sbEnabled = currentReport.sandboxEnabled !== false;
+      const inheritedFrom = currentReport.sandboxInheritedFrom || null;
+      const parentLabel = inheritedFrom ? inheritedFrom.split('/').filter(Boolean).pop() || inheritedFrom : '';
+      const currentSb = (currentReport.activeSandboxes || [])[0] || null;
+      const isPausedSb = Boolean(currentSb && /stopped/i.test(currentSb.phase || ''));
+      const runningCount = currentSb && !isPausedSb ? 1 : 0;
+      const pausedCount = currentSb && isPausedSb ? 1 : 0;
+      const badge = document.getElementById('sandboxBadge');
+      if (!sbEnabled) {
+        badge.className = 'badge warn';
+        badge.textContent = inheritedFrom ? 'Off (Parent)' : 'Off (Host)';
+        badge.title = 'OpenShell sandboxing deactivated for this worktree';
+      } else if (runningCount > 0) {
+        badge.className = 'badge allow';
+        badge.textContent = 'Running';
+        badge.title = `Current tab sandbox: ${currentSb.name} (${currentSb.phase || 'Ready'})`;
+      } else if (pausedCount > 0) {
+        badge.className = 'badge neutral';
+        badge.textContent = 'Paused';
+        badge.title = `Current tab sandbox: ${currentSb.name} (Paused)`;
+      } else {
+        badge.className = 'badge neutral';
+        badge.textContent = 'Enforced';
+        badge.title = 'No sandbox container running for this tab yet';
+      }
+
+      const toggleBtn = document.getElementById('sandboxToggleBtn');
+      if (toggleBtn) {
+        toggleBtn.setAttribute('aria-checked', sbEnabled ? 'true' : 'false');
+        toggleBtn.title = inheritedFrom
+          ? `Sandbox mode for ${ws.name} (currently inherited from ${parentLabel})`
+          : `Activate or deactivate OpenShell sandboxing for ${ws.name} and its child workspaces`;
+      }
+      const bypassNotice = document.getElementById('bypassNotice');
+      const bypassNoticeText = document.getElementById('bypassNoticeText');
+      if (bypassNotice) {
+        bypassNotice.style.display = sbEnabled ? 'none' : 'flex';
+      }
+      if (bypassNoticeText && !sbEnabled) {
+        bypassNoticeText.textContent = inheritedFrom
+          ? `Sandboxing deactivated for ${ws.name} (inherited from ${parentLabel}) \u2014 new agent tabs & chat commands run directly on host.`
+          : `Sandboxing deactivated for ${ws.name} \u2014 new agent tabs & chat commands run directly on host.`;
+      }
+
       document.getElementById('projectLabel').textContent = ws.name;
       const projBox = document.getElementById('projectStatBox');
       if (projBox) projBox.title = ws.path;
@@ -500,9 +655,11 @@
       document.getElementById('agentLabel').textContent = agentDisplay;
 
       const stateBadge = document.getElementById('agentStateBadge');
-      const sessionState = activeSession ? activeSession.state : (sbCount > 0 ? 'sandboxed' : 'ready');
+      const sessionState = activeSession
+        ? activeSession.state
+        : (runningCount > 0 ? 'sandboxed' : pausedCount > 0 ? 'paused' : 'ready');
       stateBadge.textContent = sessionState.toUpperCase();
-      stateBadge.className = 'badge ' + (sessionState === 'working' || sessionState === 'running' || sbCount > 0 ? 'allow' : 'neutral');
+      stateBadge.className = 'badge ' + (sessionState === 'working' || sessionState === 'running' || runningCount > 0 ? 'allow' : 'neutral');
 
       const agentRules = currentReport.allCliRules.filter(r => r.compatibleAgents.includes(currentReport.currentAgent));
       document.getElementById('cliCount').textContent = String(agentRules.length);
@@ -521,8 +678,10 @@
         statusEl.innerHTML = `<span class="badge neutral">Applying L7 policy...</span>`;
       }
       try {
+        const currentSbName = currentReport?.activeSandboxes?.[0]?.name;
         const res = await window.orca.plugin.request('addL7Policy', {
           ...payload,
+          ...(payload?.scope === 'session' && currentSbName ? { sandboxName: currentSbName } : {}),
           workspacePath: currentReport?.selectedWorkspace?.path,
           agent: currentReport?.currentAgent,
         });
@@ -581,9 +740,9 @@
                 <span class="source-pill">&#8984; ${escapeHtml(res.l7Suggestion.binary)}</span>
               </div>
               <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Hot-reload on running sandbox via openshell policy update">+ Session</button>
-                <button class="copy-btn quick-l7-btn" data-l7-scope="workspace" title="Save to <project>/.agents/policies/l7-custom.json &amp; apply live">+ Project</button>
-                <button class="copy-btn quick-l7-btn" data-l7-scope="global" title="Save to ~/.agents/orca-openshell-policies/<agent>.json &amp; apply live">+ Global (${escapeHtml(currentReport.currentAgent)})</button>
+                <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Allow for this session only and tag Temporary in Sandbox Egress">Allow Temporarily</button>
+                <button class="copy-btn primary quick-l7-btn" data-l7-scope="workspace" title="Save to project rules (.agents/policies/l7-custom.json) &amp; apply live">Allow (Project)</button>
+                <button class="copy-btn quick-l7-btn" data-l7-scope="global" title="Save to ~/.agents/orca-openshell-policies/${escapeHtml(currentReport.currentAgent)}.json &amp; apply live">Allow Global</button>
               </div>
               <div id="quickL7Status" style="display:none;" class="eval-result"></div>
             </div>`
@@ -741,10 +900,10 @@
           </summary>
           <div class="app-fold-body">
             <div class="controls">
-              <select id="l7Scope" style="max-width:170px;">
-                <option value="workspace">Project (.agents/policies)</option>
-                <option value="global">Global (${escapeHtml(currentReport.currentAgent)}.json)</option>
-                <option value="session">Session (Live Sandbox)</option>
+              <select id="l7Scope" style="max-width:190px;">
+                <option value="workspace">Allow (Project Rules)</option>
+                <option value="session">Allow Temporarily (Session)</option>
+                <option value="global">Allow Global (${escapeHtml(currentReport.currentAgent)}.json)</option>
               </select>
               <select id="l7Action" style="max-width:90px;">
                 <option value="allow">ALLOW</option>
@@ -778,6 +937,7 @@
         if (!egressSearch) return true;
         const q = egressSearch.toLowerCase();
         return ep.host.toLowerCase().includes(q) ||
+               (ep.ruleScope || '').toLowerCase().includes(q) ||
                (ep.triggerSource || '').toLowerCase().includes(q) ||
                (ep.triggerExplanation || '').toLowerCase().includes(q) ||
                (ep.policyName || '').toLowerCase().includes(q) ||
@@ -787,15 +947,24 @@
       const endpointsHtml = filteredEndpoints.map(ep => {
         const epKey = `${ep.host}:${ep.port}:${ep.policyName}`;
         const isOpen = Boolean(egressSearch) || openEgress.has(epKey);
+        const isTemporary = Boolean(ep.temporary || ep.ruleScope === 'temporary');
+        const isProject = ep.ruleScope === 'project';
         const hasDenyRule = (ep.l7Rules || []).some(r => r.action === 'deny') && !(ep.l7Rules || []).some(r => r.action === 'allow');
         const dotClass = hasDenyRule
           ? 'deny'
-          : ep.access === 'read-only'
-            ? 'ro'
-            : (ep.access === 'l7-rules' || (ep.l7Rules && ep.l7Rules.length > 0))
-              ? 'l7'
-              : 'rw';
+          : isTemporary
+            ? 'l7'
+            : ep.access === 'read-only'
+              ? 'ro'
+              : (ep.access === 'l7-rules' || (ep.l7Rules && ep.l7Rules.length > 0))
+                ? 'l7'
+                : 'rw';
         const triggerLabel = ep.triggerSource || (ep.compatibleCliCommands && ep.compatibleCliCommands[0]) || 'cli';
+        const scopeBadgeHtml = isTemporary
+          ? `<span class="badge warn" title="Allowed temporarily for this session only">Temporary</span>`
+          : isProject
+            ? `<span class="badge allow" title="Saved in project rules (.agents/policies)">Project</span>`
+            : '';
         const explanationText = ep.triggerExplanation ||
           `Outbound network egress to ${ep.host}:${ep.port} triggered by ${(ep.compatibleCliCommands || []).join(', ')} (defined in ${ep.source}).`;
         const l7Html = (ep.l7Rules || []).length > 0
@@ -808,6 +977,26 @@
               `<button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cmd.replace(/<[^>]+>/g, 'test'))}">${escapeHtml(cmd)}</button>`
             ).join('')}</div>`
           : '';
+        const firstL7 = (ep.l7Rules && ep.l7Rules[0]) || { action: 'allow', method: 'GET', path: '/**' };
+        const tempActionsHtml = isTemporary
+          ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;">
+              <button
+                class="copy-btn primary promote-temp-btn"
+                data-host="${escapeHtml(ep.host)}"
+                data-port="${escapeHtml(ep.port || 443)}"
+                data-action="${escapeHtml(firstL7.action || 'allow')}"
+                data-method="${escapeHtml(firstL7.method || 'GET')}"
+                data-path="${escapeHtml(firstL7.path || '/**')}"
+                title="Promote temporary rule to project rules (.agents/policies/l7-custom.json)"
+              >Allow (Add to Project)</button>
+              <button
+                class="copy-btn remove-temp-btn"
+                data-host="${escapeHtml(ep.host)}"
+                data-port="${escapeHtml(ep.port || 443)}"
+                title="Remove temporary rule tag from session"
+              >Remove</button>
+            </div>`
+          : '';
 
         return `
           <details class="egress-fold" data-egress="${escapeHtml(epKey)}" ${isOpen ? 'open' : ''}>
@@ -816,6 +1005,7 @@
                 <span class="fold-chevron">&#9654;</span>
                 <span class="access-dot ${dotClass}" title="Right: ${escapeHtml(ep.access)}"></span>
                 <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(ep.host)}${ep.port && ep.port !== 443 ? ':' + escapeHtml(ep.port) : ''}</span>
+                ${scopeBadgeHtml}
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
                 <span class="source-pill">&#8984; ${escapeHtml(triggerLabel)}</span>
@@ -826,6 +1016,7 @@
                 ${escapeHtml(explanationText)}
               </div>
               ${l7Html}
+              ${tempActionsHtml}
               <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;margin-top:2px;">
                 ${cliChipsHtml}
                 <span class="sub mono">${escapeHtml(ep.sourcePath || ep.source)}</span>
@@ -969,7 +1160,73 @@
         `;
       }).join('');
 
+      const currentSb = (currentReport.activeSandboxes || [])[0] || null;
+      const isCurrentSbStopped = Boolean(currentSb && /stopped/i.test(currentSb.phase || ''));
+      const isCurrentSbReady = Boolean(currentSb && /ready|running/i.test(currentSb.phase || ''));
+      const idleSec = typeof currentReport.sandboxIdleTimeoutSeconds === 'number'
+        ? currentReport.sandboxIdleTimeoutSeconds
+        : 300;
+      const presetIdleValues = [0, 60, 180, 300, 600, 900];
+      const customIdleOption = !presetIdleValues.includes(idleSec)
+        ? `<option value="${idleSec}" selected>${idleSec}s (Custom)</option>`
+        : '';
+      const idleControlHtml = `
+        <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+            <span style="font-size:11px;font-weight:600;color:var(--fg);">Auto-Pause When Idle</span>
+            <span class="sub">Per-tab setting: stops this tab's idle container while preserving <code class="mono">/sandbox</code> &amp; L7 policies; restarts automatically on next turn or command.</span>
+          </div>
+          <select id="idleTimeoutSelect" style="max-width:150px;flex-shrink:0;" title="Idle duration before this tab's sandbox container automatically pauses">
+            <option value="0" ${idleSec === 0 ? 'selected' : ''}>Off (Always On)</option>
+            <option value="60" ${idleSec === 60 ? 'selected' : ''}>1 minute</option>
+            <option value="180" ${idleSec === 180 ? 'selected' : ''}>3 minutes</option>
+            <option value="300" ${idleSec === 300 ? 'selected' : ''}>5 minutes</option>
+            <option value="600" ${idleSec === 600 ? 'selected' : ''}>10 minutes</option>
+            <option value="900" ${idleSec === 900 ? 'selected' : ''}>15 minutes</option>
+            ${customIdleOption}
+          </select>
+        </div>
+      `;
+
+      const currentSbCardHtml = currentSb
+        ? (() => {
+            const sbDot = isCurrentSbReady ? 'rw' : isCurrentSbStopped ? 'ro' : 'l7';
+            const phaseLabel = isCurrentSbStopped ? 'Paused' : (currentSb.phase || 'Active');
+            const actionBtnHtml = isCurrentSbStopped
+              ? `<button class="copy-btn primary resume-sb-btn" data-sandbox="${escapeHtml(currentSb.name)}" title="Restart paused OpenShell sandbox container">Resume</button>`
+              : `<button class="copy-btn pause-sb-btn" data-sandbox="${escapeHtml(currentSb.name)}" title="Stop sandbox container when idle while preserving /sandbox and L7 policies">Pause</button>`;
+            return `
+              <div class="cmd-row">
+                <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                  <span class="access-dot ${sbDot}" title="Phase: ${escapeHtml(currentSb.phase)}"></span>
+                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(currentSb.name)}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                  <span class="source-pill">${escapeHtml(phaseLabel)}</span>
+                  ${actionBtnHtml}
+                  <button class="copy-btn stop-sb-btn" data-sandbox="${escapeHtml(currentSb.name)}" title="Permanently delete OpenShell sandbox container">Delete</button>
+                </div>
+              </div>
+            `;
+          })()
+        : `<div class="sub">No sandbox container running for this tab yet.</div>`;
+
       return `
+        <details class="app-fold" data-section="sys-sb" open>
+          <summary>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span class="fold-chevron">&#9654;</span>
+              <span class="access-dot ${isCurrentSbReady ? 'rw' : 'ro'}"></span>
+              <span>Current Sandbox</span>
+            </div>
+            <span class="source-pill">&#8984; ${escapeHtml(currentSb ? currentSb.name : 'idle')}</span>
+          </summary>
+          <div class="app-fold-body">
+            ${currentSbCardHtml}
+            ${idleControlHtml}
+          </div>
+        </details>
+
         <details class="app-fold" data-section="sys-fs" ${openSections.has('sys-fs') || !openSections.has('sys-fs-closed') ? 'open' : ''}>
           <summary>
             <div style="display:flex;align-items:center;gap:8px;">
@@ -1007,6 +1264,30 @@
       if (activeTab === 'cli') container.innerHTML = renderCliTab();
       else if (activeTab === 'egress') container.innerHTML = renderEgressTab();
       else container.innerHTML = renderSystemTab();
+
+      const idleTimeoutSelect = document.getElementById('idleTimeoutSelect');
+      if (idleTimeoutSelect) {
+        idleTimeoutSelect.addEventListener('change', async (e) => {
+          const seconds = Number(e.target.value);
+          idleTimeoutSelect.disabled = true;
+          try {
+            const res = await window.orca.plugin.request('setSandboxIdleTimeout', {
+              seconds,
+              sandboxName: currentReport?.activeSandboxes?.[0]?.name,
+              paneKey: currentReport?.activeAgentSessions?.[0]?.paneKey,
+              workspacePath: currentReport?.selectedWorkspace?.path,
+              agent: currentReport?.currentAgent,
+            });
+            if (res) {
+              currentReport = res;
+              renderHeader();
+              renderActiveTab();
+            }
+          } catch {} finally {
+            idleTimeoutSelect.disabled = false;
+          }
+        });
+      }
 
       container.querySelectorAll('details.app-fold').forEach(el => {
         el.addEventListener('toggle', () => {
@@ -1137,6 +1418,106 @@
 
       if (target.dataset.copy) {
         copyText(target.dataset.copy, target);
+      } else if (target.classList.contains('pause-sb-btn')) {
+        const sbName = target.dataset.sandbox || '';
+        if (sbName) {
+          target.disabled = true;
+          target.textContent = 'Pausing...';
+          window.orca.plugin.request('pauseSandbox', {
+            sandboxName: sbName,
+            workspacePath: currentReport?.selectedWorkspace?.path,
+            agent: currentReport?.currentAgent,
+          }).then(res => {
+            if (res?.report) {
+              currentReport = res.report;
+              renderHeader();
+              renderActiveTab();
+            } else {
+              loadReport();
+            }
+          }).catch(() => {
+            target.disabled = false;
+            target.textContent = 'Pause';
+          });
+        }
+      } else if (target.classList.contains('resume-sb-btn')) {
+        const sbName = target.dataset.sandbox || '';
+        if (sbName) {
+          target.disabled = true;
+          target.textContent = 'Resuming...';
+          window.orca.plugin.request('resumeSandbox', {
+            sandboxName: sbName,
+            workspacePath: currentReport?.selectedWorkspace?.path,
+            agent: currentReport?.currentAgent,
+          }).then(res => {
+            if (res?.report) {
+              currentReport = res.report;
+              renderHeader();
+              renderActiveTab();
+            } else {
+              loadReport();
+            }
+          }).catch(() => {
+            target.disabled = false;
+            target.textContent = 'Resume';
+          });
+        }
+      } else if (target.classList.contains('stop-sb-btn')) {
+        const sbName = target.dataset.sandbox || '';
+        if (sbName) {
+          target.disabled = true;
+          target.textContent = 'Deleting...';
+          window.orca.plugin.request('stopSandbox', {
+            sandboxName: sbName,
+            workspacePath: currentReport?.selectedWorkspace?.path,
+            agent: currentReport?.currentAgent,
+          }).then(res => {
+            if (res?.report) {
+              currentReport = res.report;
+              renderHeader();
+              renderActiveTab();
+            } else {
+              loadReport();
+            }
+          }).catch(() => {
+            target.disabled = false;
+            target.textContent = 'Delete';
+          });
+        }
+      } else if (target.classList.contains('promote-temp-btn')) {
+        const host = target.dataset.host || '';
+        const port = Number(target.dataset.port || '443');
+        const action = target.dataset.action || 'allow';
+        const method = target.dataset.method || 'GET';
+        const path = target.dataset.path || '/**';
+        if (host) {
+          target.disabled = true;
+          target.textContent = 'Saving...';
+          applyL7PolicyRule({ scope: 'workspace', host, port, action, method, path, binary: '*' }, '');
+        }
+      } else if (target.classList.contains('remove-temp-btn')) {
+        const host = target.dataset.host || '';
+        const port = Number(target.dataset.port || '443');
+        if (host) {
+          target.disabled = true;
+          window.orca.plugin.request('removeTemporaryL7Rule', {
+            sandboxName: currentReport?.activeSandboxes?.[0]?.name,
+            host,
+            port,
+            workspacePath: currentReport?.selectedWorkspace?.path,
+            agent: currentReport?.currentAgent,
+          }).then(res => {
+            if (res?.report) {
+              currentReport = res.report;
+              renderHeader();
+              renderActiveTab();
+            } else {
+              loadReport();
+            }
+          }).catch(() => {
+            target.disabled = false;
+          });
+        }
       } else if (target.classList.contains('quick-l7-btn') && lastL7Suggestion) {
         const scope = target.dataset.l7Scope || 'workspace';
         applyL7PolicyRule({ ...lastL7Suggestion, scope }, 'quickL7Status');
@@ -1152,6 +1533,9 @@
       }
     });
 
+    document.getElementById('sandboxToggleBtn').addEventListener('click', () => {
+      toggleSandboxMode();
+    });
     document.getElementById('refreshBtn').addEventListener('click', () => {
       loadReport();
     });

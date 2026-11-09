@@ -195,6 +195,59 @@ export class OpenShellSandbox {
     }
   }
 
+  public getPhase(): string | null {
+    try {
+      const out = execFileSync('openshell', ['sandbox', 'list', '-o', 'json'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 8000,
+      });
+      const parsed = JSON.parse(out) as { sandboxes?: Array<{ name?: string; phase?: string }> };
+      const match = parsed.sandboxes?.find(s => s.name === this.name);
+      return match?.phase || null;
+    } catch {
+      try {
+        const out = execFileSync('openshell', ['sandbox', 'get', this.name], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 8000,
+        });
+        const phaseMatch = /^\s*Phase:\s*(\S+)/m.exec(out);
+        return phaseMatch ? phaseMatch[1] : null;
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  public stop(): boolean {
+    try {
+      execFileSync('openshell', ['sandbox', 'stop', this.name], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        timeout: 25000,
+      });
+      logDebug(`Stopped sandbox ${this.name} (hibernated)`);
+      return true;
+    } catch (err) {
+      logDebug(`Failed to stop sandbox ${this.name}: ${err}`);
+      return false;
+    }
+  }
+
+  public start(): boolean {
+    try {
+      execFileSync('openshell', ['sandbox', 'start', this.name], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        timeout: 35000,
+      });
+      logDebug(`Started sandbox ${this.name} (resumed)`);
+      return true;
+    } catch (err) {
+      logDebug(`Failed to start sandbox ${this.name}: ${err}`);
+      return false;
+    }
+  }
+
   public getRuntimeContainerId(): string | null {
     try {
       const out = execFileSync('docker', [

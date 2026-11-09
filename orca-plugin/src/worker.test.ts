@@ -4,7 +4,18 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import activate, { bridgeCommand, formatCliPolicySummary } from './worker.ts'
-import { addL7Policy, buildPolicyReport, evaluateCommandPolicy, parsePermissionYaml } from './policy-inspector.ts'
+import {
+  addL7Policy,
+  buildPolicyReport,
+  evaluateCommandPolicy,
+  getSandboxIdleTimeoutSeconds,
+  parsePermissionYaml,
+  pruneSandboxRegistryEntry,
+  recordSessionEgressRule,
+  removeTemporaryL7Rule,
+  resolveCurrentTabSandbox,
+  setSandboxIdleTimeoutSeconds,
+} from './policy-inspector.ts'
 
 test('rewrites Orca launch command while preserving flags and prompt', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-bridge-test-'))
@@ -179,4 +190,509 @@ test('parses permission policies coupled to CLI commands and evaluates command c
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('sandbox mode toggle is per-worktree and inherited by child workspaces', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-sandbox-toggle-test-'))
+  const wtA = path.join(dir, 'worktree-a')
+  const wtB = path.join(dir, 'worktree-b')
+  const childGitWt = path.join(dir, 'worktree-a-git-child')
+  const childOrcaWt = path.join(dir, 'worktree-a-orca-child')
+  const childSubdir = path.join(wtA, 'packages', 'subpkg')
+  fs.mkdirSync(path.join(wtA, '.git', 'worktrees', 'child-wt'), { recursive: true })
+  fs.mkdirSync(wtB, { recursive: true })
+  fs.mkdirSync(childGitWt, { recursive: true })
+  fs.mkdirSync(childOrcaWt, { recursive: true })
+  fs.mkdirSync(childSubdir, { recursive: true })
+  fs.writeFileSync(
+    path.join(childGitWt, '.git'),
+    `gitdir: ${path.join(wtA, '.git', 'worktrees', 'child-wt')}\n`
+  )
+
+  const binDir = path.join(dir, 'bin')
+  const policyDir = path.join(dir, 'policies')
+  fs.mkdirSync(binDir, { recursive: true })
+  fs.mkdirSync(policyDir, { recursive: true })
+  fs.writeFileSync(path.join(binDir, 'claude-box'), '#!/bin/sh\n', { mode: 0o755 })
+  fs.writeFileSync(path.join(policyDir, 'claude.json'), '{}')
+
+  const modeFile = path.join(dir, 'sandbox-mode.json')
+  const prevModeFile = process.env.ORCA_OPENSHELL_MODE_FILE
+  const prevBinDir = process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR
+  const prevPolicyDir = process.env.ORCA_OPENSHELL_POLICY_DIR
+  process.env.ORCA_OPENSHELL_MODE_FILE = modeFile
+  process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR = binDir
+  process.env.ORCA_OPENSHELL_POLICY_DIR = policyDir
+  try {
+    let handler: ((event: any, next: (event?: any) => any) => any) | undefined
+    const panelHandlers = new Map<string, (input: any) => any>()
+    activate({
+      hooks: { on: (_name: string, fn: typeof handler) => { handler = fn } },
+      panels: { handle: (name: string, fn: (input: any) => any) => { panelHandlers.set(name, fn) } },
+      log() {},
+    } as any)
+    assert.ok(handler)
+    assert.ok(panelHandlers.has('setSandboxMode'))
+
+    const setMode = panelHandlers.get('setSandboxMode')!
+    const disabledReportA = await setMode({
+      enabled: false,
+      workspacePath: wtA,
+      workspaceId: `repo-a::${wtA}`,
+      parentPaths: { [childOrcaWt]: wtA },
+      agent: 'claude',
+    })
+    assert.equal(disabledReportA.sandboxEnabled, false)
+    assert.equal(disabledReportA.sandboxInheritedFrom, null)
+
+    // Worktree B remains sandboxed
+    const reportB = buildPolicyReport({ workspacePath: wtB, agent: 'claude' })
+    assert.equal(reportB.sandboxEnabled, true)
+
+    // All child workspaces of Worktree A inherit sandboxEnabled: false
+    const gitChildReport = buildPolicyReport({ workspacePath: childGitWt, agent: 'claude' })
+    assert.equal(gitChildReport.sandboxEnabled, false)
+    assert.ok(gitChildReport.sandboxInheritedFrom?.endsWith('worktree-a'))
+
+    const orcaChildReport = buildPolicyReport({ workspacePath: childOrcaWt, agent: 'claude' })
+    assert.equal(orcaChildReport.sandboxEnabled, false)
+    assert.ok(orcaChildReport.sandboxInheritedFrom?.endsWith('worktree-a'))
+
+    const subdirChildReport = buildPolicyReport({ workspacePath: childSubdir, agent: 'claude' })
+    assert.equal(subdirChildReport.sandboxEnabled, false)
+    assert.ok(subdirChildReport.sandboxInheritedFrom?.endsWith('worktree-a'))
+
+    // Launching in Worktree A or its child worktree runs directly on host
+    const launchChildRes = handler({
+      agent: 'claude',
+      workspaceId: `repo-a::${childGitWt}`,
+      command: 'claude --dangerously-skip-permissions',
+      env: { OPENSHELL_BRIDGE_REQUIRED: '1' },
+    }, x => x)
+    assert.equal(launchChildRes.command, 'claude --dangerously-skip-permissions')
+    assert.equal(launchChildRes.env.OPENSHELL_SANDBOX_DISABLED, '1')
+    assert.equal(launchChildRes.env.OPENSHELL_BRIDGE_REQUIRED, undefined)
+
+    // Launching in Worktree B still uses claude-box
+    const launchBRes = handler({
+      agent: 'claude',
+      workspaceId: `repo-b::${wtB}`,
+      command: 'claude --dangerously-skip-permissions',
+      env: {},
+    }, x => x)
+    assert.match(launchBRes.command, /claude-box' --dangerously-skip-permissions$/)
+    assert.equal(launchBRes.env.OPENSHELL_BRIDGE_REQUIRED, '1')
+
+    const evalRes = evaluateCommandPolicy('git status', disabledReportA)
+    assert.ok(evalRes.sandboxChecks.some(c => c.layer === 'OpenShell Sandbox' && c.status === 'warn'))
+
+    // Even if a child had an explicit override, toggling parent Worktree A back on syncs children too
+    await setMode({ enabled: false, workspacePath: childOrcaWt, agent: 'claude' })
+    const enabledReportA = await setMode({ enabled: true, workspacePath: wtA, agent: 'claude' })
+    assert.equal(enabledReportA.sandboxEnabled, true)
+    assert.equal(buildPolicyReport({ workspacePath: childOrcaWt, agent: 'claude' }).sandboxEnabled, true)
+    assert.equal(buildPolicyReport({ workspacePath: childGitWt, agent: 'claude' }).sandboxEnabled, true)
+  } finally {
+    if (prevModeFile === undefined) delete process.env.ORCA_OPENSHELL_MODE_FILE
+    else process.env.ORCA_OPENSHELL_MODE_FILE = prevModeFile
+    if (prevBinDir === undefined) delete process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR
+    else process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR = prevBinDir
+    if (prevPolicyDir === undefined) delete process.env.ORCA_OPENSHELL_POLICY_DIR
+    else process.env.ORCA_OPENSHELL_POLICY_DIR = prevPolicyDir
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('temporary L7 rule shows Temporary tag in egress report and promotes cleanly to Project rules', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-temp-egress-test-'))
+  const homeDir = path.join(dir, 'home')
+  const wsDir = path.join(dir, 'workspace')
+  const sessFile = path.join(dir, 'session-egress.json')
+  fs.mkdirSync(homeDir, { recursive: true })
+  fs.mkdirSync(wsDir, { recursive: true })
+
+  const prevSessFile = process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE
+  process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE = sessFile
+  try {
+    const tempRes = addL7Policy(
+      {
+        scope: 'session',
+        workspacePath: wsDir,
+        agent: 'antigravity',
+        host: 'pypi.org',
+        port: 443,
+        action: 'allow',
+        method: 'GET',
+        path: '/simple/**',
+        binary: '*',
+        triggerCommand: 'pip install pydantic',
+      },
+      { homeDir }
+    )
+    assert.equal(tempRes.ok, true)
+
+    const reportWithTemp = buildPolicyReport({ workspacePath: wsDir, agent: 'antigravity', homeDir })
+    const tempEp = reportWithTemp.agents[0].endpoints.find(ep => ep.host === 'pypi.org')
+    assert.ok(tempEp)
+    assert.equal(tempEp.temporary, true)
+    assert.equal(tempEp.ruleScope, 'temporary')
+    assert.equal(tempEp.l7Rules?.[0]?.path, '/simple/**')
+
+    const projRes = addL7Policy(
+      {
+        scope: 'workspace',
+        workspacePath: wsDir,
+        agent: 'antigravity',
+        host: 'pypi.org',
+        port: 443,
+        action: 'allow',
+        method: 'GET',
+        path: '/simple/**',
+        binary: '*',
+        triggerCommand: 'pip install pydantic',
+      },
+      { homeDir }
+    )
+    assert.equal(projRes.ok, true)
+    assert.ok(fs.existsSync(path.join(wsDir, '.agents', 'policies', 'l7-custom.json')))
+
+    const reportAfterPromote = buildPolicyReport({ workspacePath: wsDir, agent: 'antigravity', homeDir })
+    const projEp = reportAfterPromote.agents[0].endpoints.find(ep => ep.host === 'pypi.org')
+    assert.ok(projEp)
+    assert.equal(projEp.temporary, false)
+    assert.equal(projEp.ruleScope, 'project')
+    assert.equal(projEp.sourcePath, '.agents/policies/l7-custom.json')
+
+    // Verify every field in report and addL7Policy responses satisfies Orca's strict isJsonValue check (no undefined properties)
+    const assertStrictJson = (val: unknown, keyPath = '$'): void => {
+      if (val === null || typeof val === 'string' || typeof val === 'boolean') return
+      if (typeof val === 'number') {
+        assert.ok(Number.isFinite(val), `Non-finite number at ${keyPath}`)
+        return
+      }
+      assert.notEqual(val, undefined, `Undefined value at ${keyPath}`)
+      assert.equal(typeof val, 'object', `Non-JSON type ${typeof val} at ${keyPath}`)
+      if (Array.isArray(val)) {
+        val.forEach((item, idx) => assertStrictJson(item, `${keyPath}[${idx}]`))
+        return
+      }
+      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+        assertStrictJson(v, `${keyPath}.${k}`)
+      }
+    }
+    assertStrictJson(tempRes)
+    assertStrictJson(reportWithTemp)
+    assertStrictJson(projRes)
+    assertStrictJson(reportAfterPromote)
+  } finally {
+    if (prevSessFile === undefined) delete process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE
+    else process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE = prevSessFile
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('setSandboxIdleTimeout persists timeout and survives setSandboxMode toggles', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-idle-timeout-test-'))
+  const wsDir = path.join(dir, 'workspace')
+  fs.mkdirSync(wsDir, { recursive: true })
+  const modeFile = path.join(dir, 'sandbox-mode.json')
+  const prevModeFile = process.env.ORCA_OPENSHELL_MODE_FILE
+  process.env.ORCA_OPENSHELL_MODE_FILE = modeFile
+  try {
+    const panelHandlers = new Map<string, (input: any) => any>()
+    activate({
+      hooks: { on() {} },
+      panels: { handle: (name: string, fn: (input: any) => any) => { panelHandlers.set(name, fn) } },
+      log() {},
+    } as any)
+
+    assert.ok(panelHandlers.has('setSandboxIdleTimeout'))
+    assert.ok(panelHandlers.has('pauseSandbox'))
+    assert.ok(panelHandlers.has('resumeSandbox'))
+
+    const initialReport = buildPolicyReport({ workspacePath: wsDir, agent: 'claude' })
+    assert.equal(initialReport.sandboxIdleTimeoutSeconds, 300)
+
+    const setIdle = panelHandlers.get('setSandboxIdleTimeout')!
+    const updatedReport = await setIdle({ seconds: 180, workspacePath: wsDir, agent: 'claude' })
+    assert.equal(updatedReport.sandboxIdleTimeoutSeconds, 180)
+
+    // Toggling per-worktree sandbox mode preserves idleTimeoutSeconds
+    const setMode = panelHandlers.get('setSandboxMode')!
+    const toggledReport = await setMode({ enabled: false, workspacePath: wsDir, agent: 'claude' })
+    assert.equal(toggledReport.sandboxEnabled, false)
+    assert.equal(toggledReport.sandboxIdleTimeoutSeconds, 180)
+
+    // Setting 0 disables auto-pause
+    const disabledIdleReport = await setIdle({ seconds: 0, workspacePath: wsDir, agent: 'claude' })
+    assert.equal(disabledIdleReport.sandboxIdleTimeoutSeconds, 0)
+  } finally {
+    if (prevModeFile === undefined) delete process.env.ORCA_OPENSHELL_MODE_FILE
+    else process.env.ORCA_OPENSHELL_MODE_FILE = prevModeFile
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('resolveCurrentTabSandbox returns only the sandbox running in the active tab', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-tab-sandbox-test-'))
+  const wsA = path.join(dir, 'ade-nvidia-openshell-plugin')
+  const wsB = path.join(dir, 'other-repo')
+  fs.mkdirSync(wsA, { recursive: true })
+  fs.mkdirSync(wsB, { recursive: true })
+  const regFile = path.join(dir, 'sandbox-registry.json')
+  const prevReg = process.env.ORCA_OPENSHELL_REGISTRY_FILE
+  process.env.ORCA_OPENSHELL_REGISTRY_FILE = regFile
+  try {
+    fs.writeFileSync(
+      regFile,
+      JSON.stringify({
+        entries: [
+          {
+            sandboxName: 'ag-ade-nv-tab1',
+            agent: 'antigravity',
+            workspacePath: wsA,
+            agentSessionId: 'antigravity_tab_one',
+            pid: process.pid,
+          },
+          {
+            sandboxName: 'ag-ade-nv-tab2',
+            agent: 'antigravity',
+            workspacePath: wsA,
+            agentSessionId: 'antigravity_tab_two',
+            pid: process.pid,
+          },
+          {
+            sandboxName: 'ag-other-repo1',
+            agent: 'antigravity',
+            workspacePath: wsB,
+            agentSessionId: 'antigravity_other_repo',
+            pid: process.pid,
+          },
+        ],
+      })
+    )
+
+    const allSandboxes = [
+      { name: 'ag-orca-c-probe1', created: '2026-11-08 20:34:05', phase: 'Ready', agent: 'antigravity' },
+      { name: 'ag-ade-nv-tab1', created: '2026-11-09 19:00:00', phase: 'Stopped', agent: 'antigravity' },
+      { name: 'ag-ade-nv-tab2', created: '2026-11-09 19:30:00', phase: 'Ready', agent: 'antigravity' },
+      { name: 'ag-other-repo1', created: '2026-11-09 19:45:00', phase: 'Ready', agent: 'antigravity' },
+      { name: 'cc-ade-nv-claude1', created: '2026-11-09 19:50:00', phase: 'Ready', agent: 'claude' },
+    ]
+
+    // Active tab 1 in wsA -> only ag-ade-nv-tab1
+    const tab1Result = resolveCurrentTabSandbox({
+      allSandboxes,
+      selectedWorkspace: { id: `local::${wsA}`, name: 'ade-nvidia-openshell-plugin', path: wsA, branch: 'master' },
+      currentAgent: 'antigravity',
+      activeAgentSessions: [
+        {
+          agent: 'antigravity',
+          state: 'working',
+          conversationName: 'Tab 1',
+          paneKey: 'structured-agent-session-antigravity_tab_one:leaf-1',
+          updatedAt: 200,
+        },
+        {
+          agent: 'antigravity',
+          state: 'done',
+          conversationName: 'Tab 2',
+          paneKey: 'structured-agent-session-antigravity_tab_two:leaf-2',
+          updatedAt: 100,
+        },
+      ],
+      homeDir: dir,
+    })
+    assert.deepEqual(tab1Result.map(s => s.name), ['ag-ade-nv-tab1'])
+
+    // Switching focus to tab 2 in wsA -> only ag-ade-nv-tab2
+    const tab2Result = resolveCurrentTabSandbox({
+      allSandboxes,
+      selectedWorkspace: { id: `local::${wsA}`, name: 'ade-nvidia-openshell-plugin', path: wsA, branch: 'master' },
+      currentAgent: 'antigravity',
+      activeAgentSessions: [
+        {
+          agent: 'antigravity',
+          state: 'working',
+          conversationName: 'Tab 2',
+          paneKey: 'structured-agent-session-antigravity_tab_two:leaf-2',
+          updatedAt: 300,
+        },
+      ],
+      homeDir: dir,
+    })
+    assert.deepEqual(tab2Result.map(s => s.name), ['ag-ade-nv-tab2'])
+
+    // Workspace with no sandbox for the active tab -> empty array (never leaks other tabs/repos)
+    const emptyTabResult = resolveCurrentTabSandbox({
+      allSandboxes,
+      selectedWorkspace: { id: `local::${wsA}`, name: 'ade-nvidia-openshell-plugin', path: wsA, branch: 'master' },
+      currentAgent: 'antigravity',
+      activeAgentSessions: [
+        {
+          agent: 'antigravity',
+          state: 'done',
+          conversationName: 'New Idle Tab',
+          paneKey: 'structured-agent-session-antigravity_brand_new_tab:leaf-3',
+          updatedAt: 400,
+        },
+      ],
+      homeDir: dir,
+    })
+    assert.deepEqual(emptyTabResult, [])
+  } finally {
+    if (prevReg === undefined) delete process.env.ORCA_OPENSHELL_REGISTRY_FILE
+    else process.env.ORCA_OPENSHELL_REGISTRY_FILE = prevReg
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('Auto-Pause When Idle is strictly per-tab and Temporary L7 rules are scoped per sandboxName', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-per-tab-isolation-test-'))
+  const wsDir = path.join(dir, 'workspace')
+  fs.mkdirSync(wsDir, { recursive: true })
+  const modeFile = path.join(dir, 'sandbox-mode.json')
+  const regFile = path.join(dir, 'sandbox-registry.json')
+  const sessFile = path.join(dir, 'session-egress.json')
+
+  const prevMode = process.env.ORCA_OPENSHELL_MODE_FILE
+  const prevReg = process.env.ORCA_OPENSHELL_REGISTRY_FILE
+  const prevSess = process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE
+  process.env.ORCA_OPENSHELL_MODE_FILE = modeFile
+  process.env.ORCA_OPENSHELL_REGISTRY_FILE = regFile
+  process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE = sessFile
+
+  try {
+    fs.writeFileSync(
+      regFile,
+      JSON.stringify({
+        entries: [
+          {
+            sandboxName: 'ag-ws-tab1',
+            agent: 'antigravity',
+            workspacePath: wsDir,
+            agentSessionId: 'antigravity_tab_alpha',
+            pid: process.pid,
+          },
+          {
+            sandboxName: 'ag-ws-tab2',
+            agent: 'antigravity',
+            workspacePath: wsDir,
+            agentSessionId: 'antigravity_tab_beta',
+            pid: process.pid,
+          },
+        ],
+      })
+    )
+
+    // 1. Per-tab Auto-Pause When Idle: setting Tab 1 to 60s leaves Tab 2 at default 300s
+    setSandboxIdleTimeoutSeconds(
+      60,
+      {
+        sandboxName: 'ag-ws-tab1',
+        paneKey: 'structured-agent-session-antigravity_tab_alpha:leaf-1',
+        workspacePath: wsDir,
+        agent: 'antigravity',
+      },
+      dir
+    )
+    assert.equal(
+      getSandboxIdleTimeoutSeconds(
+        { sandboxName: 'ag-ws-tab1', paneKey: 'structured-agent-session-antigravity_tab_alpha:leaf-1' },
+        dir
+      ),
+      60
+    )
+    assert.equal(
+      getSandboxIdleTimeoutSeconds(
+        { sandboxName: 'ag-ws-tab2', paneKey: 'structured-agent-session-antigravity_tab_beta:leaf-2' },
+        dir
+      ),
+      300
+    )
+
+    // Setting Tab 2 to Off (0s) does not affect Tab 1 (60s)
+    setSandboxIdleTimeoutSeconds(
+      0,
+      {
+        sandboxName: 'ag-ws-tab2',
+        paneKey: 'structured-agent-session-antigravity_tab_beta:leaf-2',
+        workspacePath: wsDir,
+        agent: 'antigravity',
+      },
+      dir
+    )
+    assert.equal(getSandboxIdleTimeoutSeconds({ sandboxName: 'ag-ws-tab1' }, dir), 60)
+    assert.equal(getSandboxIdleTimeoutSeconds({ sandboxName: 'ag-ws-tab2' }, dir), 0)
+
+    // Deleting Tab 1's sandbox prunes sandbox:ag-ws-tab1 while keeping session:antigravity_tab_alpha for seamless recreate
+    pruneSandboxRegistryEntry('ag-ws-tab1', dir)
+    assert.equal(
+      getSandboxIdleTimeoutSeconds({ agentSessionId: 'antigravity_tab_alpha' }, dir),
+      60
+    )
+
+    // 2. Per-sandbox Temporary L7 egress rules: two sibling tabs in same worktree stay isolated
+    recordSessionEgressRule(
+      {
+        sandboxName: 'ag-ws-tab1',
+        workspacePath: wsDir,
+        agent: 'antigravity',
+        ruleName: 'crates_io_l7',
+        host: 'crates.io',
+        port: 443,
+        action: 'allow',
+        method: 'GET',
+        path: '/api/**',
+        binary: '*',
+        createdAt: new Date().toISOString(),
+      },
+      dir
+    )
+    recordSessionEgressRule(
+      {
+        sandboxName: 'ag-ws-tab2',
+        workspacePath: wsDir,
+        agent: 'antigravity',
+        ruleName: 'pypi_org_l7',
+        host: 'pypi.org',
+        port: 443,
+        action: 'allow',
+        method: 'GET',
+        path: '/simple/**',
+        binary: '*',
+        createdAt: new Date().toISOString(),
+      },
+      dir
+    )
+
+    // Removing crates.io on ag-ws-tab2 fails (does not exist on tab2), while removing on ag-ws-tab1 succeeds without touching tab2
+    const wrongTabRemove = removeTemporaryL7Rule(
+      { sandboxName: 'ag-ws-tab2', workspacePath: wsDir, host: 'crates.io', port: 443 },
+      { homeDir: dir }
+    )
+    assert.equal(wrongTabRemove.ok, false)
+
+    const rightTabRemove = removeTemporaryL7Rule(
+      { sandboxName: 'ag-ws-tab1', workspacePath: wsDir, host: 'crates.io', port: 443 },
+      { homeDir: dir }
+    )
+    assert.equal(rightTabRemove.ok, true)
+
+    const remaining = JSON.parse(fs.readFileSync(sessFile, 'utf8')).entries
+    assert.equal(remaining.length, 1)
+    assert.equal(remaining[0].sandboxName, 'ag-ws-tab2')
+    assert.equal(remaining[0].host, 'pypi.org')
+  } finally {
+    if (prevMode === undefined) delete process.env.ORCA_OPENSHELL_MODE_FILE
+    else process.env.ORCA_OPENSHELL_MODE_FILE = prevMode
+    if (prevReg === undefined) delete process.env.ORCA_OPENSHELL_REGISTRY_FILE
+    else process.env.ORCA_OPENSHELL_REGISTRY_FILE = prevReg
+    if (prevSess === undefined) delete process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE
+    else process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE = prevSess
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+
 

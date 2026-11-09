@@ -97,7 +97,8 @@ export class DelegationBroker {
   }
   get sandboxDir(): string { return this.dir; }
   start(): void {
-    execFileSync('openshell', ['sandbox', 'exec', '--name', this.sandbox, '--no-tty', '--no-login-shell', '--', 'sh', '-c', 'mkdir -m 700 "$1" && mkfifo -m 600 "$1/requests"', 'sh', this.dir], { timeout: 15000 });
+    this.stop();
+    execFileSync('openshell', ['sandbox', 'exec', '--name', this.sandbox, '--no-tty', '--no-login-shell', '--', 'sh', '-c', 'rm -rf "$1" && mkdir -m 700 "$1" && mkfifo -m 600 "$1/requests"', 'sh', this.dir], { timeout: 15000 });
     this.reader = spawn('openshell', ['sandbox', 'exec', '--name', this.sandbox, '--no-tty', '--no-login-shell', '--', 'sh', '-c', 'while :; do cat "$1"; done', 'sh', `${this.dir}/requests`], { stdio: ['pipe', 'pipe', 'pipe'] });
     this.reader.stdin.end();
     this.reader.on('error', error => logDebug(`Delegation reader failed: ${error}`));

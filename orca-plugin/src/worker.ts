@@ -3,7 +3,25 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { addL7Policy, type AddL7PolicyRequest, buildPolicyReport, buildPolicyReportAsync, evaluateCommandPolicy, type PolicyInspectionReport } from './policy-inspector.ts'
+import {
+  addL7Policy,
+  type AddL7PolicyRequest,
+  buildPolicyReport,
+  buildPolicyReportAsync,
+  discoverCurrentOrcaContext,
+  evaluateCommandPolicy,
+  getSandboxMode,
+  listActiveSandboxes,
+  pauseActiveSandbox,
+  type PolicyInspectionReport,
+  removeTemporaryL7Rule,
+  resolveCurrentTabSandbox,
+  resolveWorkspacePathById,
+  resumeActiveSandbox,
+  setSandboxIdleTimeoutSeconds,
+  setSandboxMode,
+  stopActiveSandbox,
+} from './policy-inspector.ts'
 
 const wrappers: Record<string, string> = {
   codex: 'codex-box',
@@ -13,10 +31,10 @@ const wrappers: Record<string, string> = {
 }
 
 const allowedExecutables: Record<string, string[]> = {
-  codex: ['codex'],
-  claude: ['claude'],
-  antigravity: ['antigravity', 'agy'],
-  agy: ['antigravity', 'agy'],
+  codex: ['codex', 'codex-box'],
+  claude: ['claude', 'claude-box'],
+  antigravity: ['antigravity', 'agy', 'agy-box'],
+  agy: ['antigravity', 'agy', 'agy-box'],
 }
 
 function shellQuote(value: string): string {
@@ -44,6 +62,7 @@ export function formatCliPolicySummary(workspacePath?: string): string {
   const report = buildPolicyReport({ workspacePath })
   const lines: string[] = [
     `=== OpenShell Policy & CLI Command Report (${report.selectedWorkspace.name}) ===`,
+    `Sandbox Mode: ${report.sandboxEnabled ? 'Enforced' : 'Deactivated (Host Mode)'}`,
     `Active Sandboxes: ${report.activeSandboxes.length > 0 ? report.activeSandboxes.map(s => `${s.name} (${s.phase})`).join(', ') : 'none'}`,
     '',
     '1. Agent Launch Policies & Coupled CLI Commands:',
@@ -81,17 +100,30 @@ export default function activate(orca: OrcaWorkerApi): void {
   const updateStatusBarFromReport = (report: PolicyInspectionReport) => {
     if (!orca.host?.call) return
     try {
-      const activeCount = report.activeSandboxes.length
+      const currentSb = report.activeSandboxes[0] || null
+      const isPaused = Boolean(currentSb && /stopped/i.test(currentSb.phase || ''))
+      const isRunning = Boolean(currentSb && !isPaused)
       const allowCount = report.allCliRules.filter(r => r.action === 'allow').length
-      const text = activeCount > 0
-        ? `OpenShell (${report.currentAgent}): ${activeCount} sandbox${activeCount === 1 ? '' : 'es'} (${allowCount} CLI rules)`
-        : `OpenShell (${report.currentAgent}): Enforced (${allowCount} CLI rules)`
+      const enabled = report.sandboxEnabled !== false
+      const text = !enabled
+        ? 'OpenShell: Off (Host Mode)'
+        : isRunning
+          ? `OpenShell (${report.currentAgent}): ${currentSb!.name} (${allowCount} CLI rules)`
+          : isPaused
+            ? `OpenShell (${report.currentAgent}): ${currentSb!.name} paused (${allowCount} CLI rules)`
+            : `OpenShell (${report.currentAgent}): Enforced (${allowCount} CLI rules)`
+      const tone = !enabled ? 'warning' : isRunning ? 'accent' : 'success'
+      const tooltip = !enabled
+        ? `Project: ${report.selectedWorkspace.name} - OpenShell sandboxing is deactivated (launches & commands run directly on host)`
+        : currentSb
+          ? `Project: ${report.selectedWorkspace.name} - Current tab sandbox: ${currentSb.name} (${isPaused ? 'Paused' : currentSb.phase}) - ${allowCount} allowed CLI command patterns`
+          : `Project: ${report.selectedWorkspace.name} - Agent: ${report.currentAgent} - No sandbox running for current tab yet - ${allowCount} allowed CLI command patterns`
       void orca.host.call('statusBar.update', {
         id: 'openshell-status',
         text,
         icon: 'layers',
-        tone: activeCount > 0 ? 'accent' : 'success',
-        tooltip: `Project: ${report.selectedWorkspace.name} • Agent: ${report.currentAgent} • ${activeCount} active sandbox(es) • ${allowCount} allowed CLI command patterns`,
+        tone,
+        tooltip,
         visible: true,
       }).catch(() => {})
     } catch {}
@@ -99,7 +131,7 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   const refreshStatusBar = () => {
     if (!orca.host?.call) return
-    void buildPolicyReportAsync({ agent: lastAgent })
+    void buildPolicyReportAsync({ fallbackAgent: lastAgent })
       .then(updateStatusBarFromReport)
       .catch(() => {})
   }
@@ -107,6 +139,23 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.hooks.on('agent.launch.before', (event, next) => {
     if (event.agent) lastAgent = event.agent
     if (!(event.agent in wrappers)) return next()
+    const safeEnv = Object.fromEntries(
+      Object.entries(event.env).filter(
+        ([key]) => !key.startsWith('OPENSHELL_BRIDGE_') && key !== 'OPENSHELL_SANDBOX_DISABLED'
+      )
+    )
+    const launchWorkspacePath = resolveWorkspacePathById(event.workspaceId)
+    if (!getSandboxMode({ workspacePath: launchWorkspacePath, workspaceId: event.workspaceId }).enabled) {
+      orca.log(`OpenShell sandboxing deactivated for worktree; launching ${event.agent} on host in ${event.workspaceId ?? launchWorkspacePath ?? 'unknown workspace'}`)
+      setTimeout(refreshStatusBar, 500)
+      return next({
+        ...event,
+        env: {
+          ...safeEnv,
+          OPENSHELL_SANDBOX_DISABLED: '1',
+        },
+      })
+    }
     try {
       const binDir = process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR || path.join(os.homedir(), '.local', 'bin')
       const command = bridgeCommand(event.agent, event.command, binDir)
@@ -118,7 +167,6 @@ export default function activate(orca: OrcaWorkerApi): void {
         else if (event.agent === 'agy') policyFile = path.join(policyDir, 'antigravity.json')
       }
       if (!fs.existsSync(policyFile)) return { deny: `OpenShell policy is missing: ${policyFile}` }
-      const safeEnv = Object.fromEntries(Object.entries(event.env).filter(([key]) => !key.startsWith('OPENSHELL_BRIDGE_')))
       orca.log(`OpenShell bridge selected for ${event.agent} in ${event.workspaceId ?? 'unknown workspace'}`)
       setTimeout(refreshStatusBar, 1500)
       return next({ ...event, command, env: {
@@ -135,23 +183,143 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   })
 
+  const toStrictJson = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
   orca.panels?.handle('getPolicyReport', async (input) => {
     const req = (input && typeof input === 'object' ? input : {}) as { workspacePath?: string; agent?: string }
     const report = await buildPolicyReportAsync({
       workspacePath: req.workspacePath,
-      agent: req.agent || lastAgent,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
     })
     updateStatusBarFromReport(report)
-    return report
+    return toStrictJson(report)
+  })
+
+  orca.panels?.handle('setSandboxMode', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      enabled?: boolean
+      workspacePath?: string
+      workspaceId?: string
+      parentPaths?: Record<string, string>
+      agent?: string
+    }
+    const targetWorkspacePath =
+      req.workspacePath ||
+      resolveWorkspacePathById(req.workspaceId) ||
+      discoverCurrentOrcaContext({ agent: req.agent, fallbackAgent: lastAgent }).workspace.path
+    setSandboxMode(Boolean(req.enabled), {
+      workspacePath: targetWorkspacePath,
+      workspaceId: req.workspaceId,
+      parentPaths: req.parentPaths,
+    })
+    const report = await buildPolicyReportAsync({
+      workspacePath: req.workspacePath || targetWorkspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    return toStrictJson(report)
+  })
+
+  orca.panels?.handle('setSandboxIdleTimeout', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      seconds?: number
+      sandboxName?: string
+      paneKey?: string
+      agentSessionId?: string
+      terminalId?: string
+      workspacePath?: string
+      agent?: string
+    }
+    const ctx = discoverCurrentOrcaContext({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    const currentTabSb =
+      req.sandboxName ||
+      resolveCurrentTabSandbox({
+        allSandboxes: listActiveSandboxes(),
+        selectedWorkspace: ctx.workspace,
+        currentAgent: ctx.currentAgent,
+        activeAgentSessions: ctx.activeAgentSessions,
+      })[0]?.name
+    const activePaneKey = req.paneKey || ctx.activeAgentSessions[0]?.paneKey || undefined
+
+    setSandboxIdleTimeoutSeconds(Number(req.seconds ?? 300), {
+      sandboxName: currentTabSb,
+      paneKey: activePaneKey,
+      agentSessionId: req.agentSessionId,
+      terminalId: req.terminalId,
+      workspacePath: req.workspacePath || ctx.workspace.path,
+      agent: req.agent || ctx.currentAgent,
+    })
+    const report = await buildPolicyReportAsync({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    return toStrictJson(report)
+  })
+
+  orca.panels?.handle('pauseSandbox', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      sandboxName?: string
+      workspacePath?: string
+      agent?: string
+    }
+    const res = await pauseActiveSandbox(String(req.sandboxName || ''))
+    const report = await buildPolicyReportAsync({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    return toStrictJson({ ...res, report })
+  })
+
+  orca.panels?.handle('resumeSandbox', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      sandboxName?: string
+      workspacePath?: string
+      agent?: string
+    }
+    const res = await resumeActiveSandbox(String(req.sandboxName || ''))
+    const report = await buildPolicyReportAsync({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    return toStrictJson({ ...res, report })
+  })
+
+  orca.panels?.handle('stopSandbox', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      sandboxName?: string
+      workspacePath?: string
+      agent?: string
+    }
+    const res = await stopActiveSandbox(String(req.sandboxName || ''))
+    const report = await buildPolicyReportAsync({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    return toStrictJson({ ...res, report })
   })
 
   orca.panels?.handle('evaluateCommand', async (input) => {
     const req = (input && typeof input === 'object' ? input : {}) as { command?: string; workspacePath?: string; agent?: string }
     const report = await buildPolicyReportAsync({
       workspacePath: req.workspacePath,
-      agent: req.agent || lastAgent,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
     })
-    return evaluateCommandPolicy(String(req.command || ''), report)
+    return toStrictJson(evaluateCommandPolicy(String(req.command || ''), report))
   })
 
   orca.panels?.handle('addL7Policy', (input) => {
@@ -160,14 +328,37 @@ export default function activate(orca: OrcaWorkerApi): void {
       scope: req.scope || 'workspace',
       host: req.host || '',
       ...req,
-      agent: req.agent || lastAgent,
+      agent: req.agent,
     })
     refreshStatusBar()
-    return res
+    return toStrictJson(res)
+  })
+
+  orca.panels?.handle('removeTemporaryL7Rule', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      sandboxName?: string
+      workspacePath?: string
+      host?: string
+      port?: number
+      agent?: string
+    }
+    const res = removeTemporaryL7Rule({
+      sandboxName: req.sandboxName,
+      workspacePath: req.workspacePath,
+      host: String(req.host || ''),
+      port: req.port,
+    })
+    const report = await buildPolicyReportAsync({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    return toStrictJson({ ...res, report })
   })
 
   orca.commands?.register('openshell.inspectPolicies', async () => {
-    await buildPolicyReportAsync({ agent: lastAgent })
+    await buildPolicyReportAsync({ fallbackAgent: lastAgent })
     refreshStatusBar()
     return formatCliPolicySummary()
   })

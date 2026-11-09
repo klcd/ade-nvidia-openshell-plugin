@@ -41,6 +41,8 @@ export interface NetworkEndpointRule {
   policyName: string
   source: string
   sourcePath?: string
+  ruleScope?: 'temporary' | 'project' | 'global' | 'profile'
+  temporary?: boolean
   host: string
   port: number
   protocol: string
@@ -127,8 +129,17 @@ export interface ActiveAgentSessionInfo {
   updatedAt: number
 }
 
+export interface SandboxModeState {
+  enabled: boolean
+  updatedAt: string | null
+  inheritedFrom: string | null
+}
+
 export interface PolicyInspectionReport {
   generatedAt: string
+  sandboxEnabled: boolean
+  sandboxInheritedFrom: string | null
+  sandboxIdleTimeoutSeconds: number
   selectedWorkspace: WorkspaceEntry
   currentAgent: 'claude' | 'codex' | 'antigravity'
   activeAgentSessions: ActiveAgentSessionInfo[]
@@ -139,6 +150,606 @@ export interface PolicyInspectionReport {
   allCliRules: CliPermissionRule[]
   delegation: DelegationPolicySummary
   nativeSync: NativeAgentSyncStatus
+}
+
+interface OrcaWorktreePsEntry {
+  worktreeId?: string
+  worktreeInstanceId?: string
+  parentWorktreeId?: string | null
+  childWorktreeIds?: string[]
+  isMainWorktree?: boolean
+  path?: string
+  repo?: string
+  displayName?: string
+  branch?: string | null
+  isActive?: boolean
+  agents?: Array<{
+    paneKey?: string | null
+    state?: string
+    agentType?: string
+    conversationName?: string | null
+    updatedAt?: number
+  }>
+}
+
+let cachedOrcaWorktrees: OrcaWorktreePsEntry[] = []
+let lastOrcaRefreshAt = 0
+let orcaRefreshInFlight: Promise<void> | null = null
+
+interface SandboxModeFileData {
+  enabled?: boolean
+  updatedAt?: string
+  idleTimeoutSeconds?: number
+  tabIdleTimeouts?: Record<string, { seconds: number; updatedAt: string }>
+  worktrees?: Record<string, { enabled: boolean; updatedAt: string; workspaceId?: string }>
+  parentPaths?: Record<string, string>
+}
+
+export function normalizeWorktreePath(rawPath?: string | null): string {
+  if (!rawPath) return ''
+  try {
+    return fs.existsSync(rawPath) ? fs.realpathSync(rawPath) : path.resolve(rawPath)
+  } catch {
+    return path.resolve(rawPath)
+  }
+}
+
+export function resolveGitMainWorktreePath(dirPath: string): string | null {
+  try {
+    const dotGit = path.join(dirPath, '.git')
+    if (!fs.existsSync(dotGit)) return null
+    const stat = fs.lstatSync(dotGit)
+    if (!stat.isFile()) return null
+    const content = fs.readFileSync(dotGit, 'utf8').trim()
+    if (!content.startsWith('gitdir:')) return null
+    const rawGitDir = content.slice('gitdir:'.length).trim()
+    const absGitDir = path.resolve(dirPath, rawGitDir)
+    const worktreesSegment = `${path.sep}.git${path.sep}worktrees${path.sep}`
+    const idx = absGitDir.indexOf(worktreesSegment)
+    if (idx > 0) {
+      return normalizeWorktreePath(absGitDir.slice(0, idx))
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+function extractPathFromWorkspaceId(workspaceId?: string | null): string {
+  if (!workspaceId) return ''
+  const sepIdx = workspaceId.indexOf('::/')
+  if (sepIdx >= 0) {
+    return workspaceId.slice(sepIdx + 2)
+  }
+  return ''
+}
+
+export function resolveWorkspacePathById(workspaceId?: string | null): string | undefined {
+  if (!workspaceId) return undefined
+  const fromId = extractPathFromWorkspaceId(workspaceId)
+  if (fromId) return fromId
+  for (const w of cachedOrcaWorktrees) {
+    if (!w.path) continue
+    if (
+      w.worktreeId === workspaceId ||
+      w.worktreeInstanceId === workspaceId ||
+      (w.worktreeInstanceId && `wt2:local:${w.worktreeInstanceId}` === workspaceId)
+    ) {
+      return w.path
+    }
+  }
+  return undefined
+}
+
+function collectOrcaWorktreeParentMap(worktrees: OrcaWorktreePsEntry[]): Record<string, string> {
+  const byId = new Map<string, string>()
+  for (const w of worktrees) {
+    if (!w.path) continue
+    const norm = normalizeWorktreePath(w.path)
+    if (w.worktreeId) byId.set(w.worktreeId, norm)
+    if (w.worktreeInstanceId) {
+      byId.set(w.worktreeInstanceId, norm)
+      byId.set(`wt2:local:${w.worktreeInstanceId}`, norm)
+    }
+  }
+  const parents: Record<string, string> = {}
+  for (const w of worktrees) {
+    if (!w.path) continue
+    const normPath = normalizeWorktreePath(w.path)
+    if (w.parentWorktreeId) {
+      const parentRaw = byId.get(w.parentWorktreeId) || extractPathFromWorkspaceId(w.parentWorktreeId)
+      const normParent = normalizeWorktreePath(parentRaw)
+      if (normParent && normParent !== normPath) {
+        parents[normPath] = normParent
+      }
+    }
+    for (const childId of w.childWorktreeIds ?? []) {
+      const childRaw = byId.get(childId) || extractPathFromWorkspaceId(childId)
+      const normChild = normalizeWorktreePath(childRaw)
+      if (normChild && normChild !== normPath) {
+        parents[normChild] = normPath
+      }
+    }
+  }
+  return parents
+}
+
+function syncOrcaWorktreeLineage(worktrees: OrcaWorktreePsEntry[], homeDir = os.homedir()): void {
+  const discovered = collectOrcaWorktreeParentMap(worktrees)
+  if (Object.keys(discovered).length === 0) return
+  const filePath = getSandboxModeFilePath(homeDir)
+  try {
+    let existing: SandboxModeFileData = {}
+    if (fs.existsSync(filePath)) {
+      existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+    }
+    const prevParents = existing.parentPaths || {}
+    let changed = false
+    const mergedParents: Record<string, string> = { ...prevParents }
+    for (const [childPath, parentPath] of Object.entries(discovered)) {
+      if (mergedParents[childPath] !== parentPath) {
+        mergedParents[childPath] = parentPath
+        changed = true
+      }
+    }
+    if (changed) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true })
+      fs.writeFileSync(
+        filePath,
+        JSON.stringify({ ...existing, parentPaths: mergedParents }, null, 2) + '\n',
+        'utf8'
+      )
+    }
+  } catch {}
+}
+
+function doesPathDescendFrom(
+  candidatePath: string,
+  targetAncestor: string,
+  parentMap: Map<string, string>
+): boolean {
+  const visited = new Set<string>()
+  let curr = normalizeWorktreePath(candidatePath)
+  const normAncestor = normalizeWorktreePath(targetAncestor)
+  if (!curr || !normAncestor || curr === normAncestor) return false
+
+  while (curr && !visited.has(curr)) {
+    visited.add(curr)
+    if (curr === normAncestor) return true
+    if (curr.startsWith(normAncestor + path.sep)) return true
+
+    let nextParent = parentMap.get(curr) || resolveGitMainWorktreePath(curr) || ''
+    let anc = path.dirname(curr)
+    while (anc && anc !== curr && anc !== path.dirname(anc)) {
+      if (anc === normAncestor) return true
+      if (!nextParent) {
+        nextParent = parentMap.get(anc) || resolveGitMainWorktreePath(anc) || ''
+      }
+      anc = path.dirname(anc)
+    }
+    if (nextParent && !visited.has(nextParent)) {
+      curr = nextParent
+      continue
+    }
+    break
+  }
+  return false
+}
+
+export interface SandboxModeQueryOptions {
+  workspacePath?: string
+  workspaceId?: string
+  parentPaths?: Record<string, string>
+}
+
+export function getSandboxModeFilePath(homeDir = os.homedir()): string {
+  if (process.env.ORCA_OPENSHELL_MODE_FILE) {
+    return process.env.ORCA_OPENSHELL_MODE_FILE
+  }
+  return path.join(homeDir, '.config', 'orca-openshell', 'sandbox-mode.json')
+}
+
+export function getSandboxMode(
+  optionsOrHomeDir?: SandboxModeQueryOptions | string,
+  homeDirArg = os.homedir()
+): SandboxModeState {
+  const opts: SandboxModeQueryOptions =
+    typeof optionsOrHomeDir === 'string' ? {} : (optionsOrHomeDir || {})
+  const homeDir = typeof optionsOrHomeDir === 'string' ? optionsOrHomeDir : homeDirArg
+  const filePath = getSandboxModeFilePath(homeDir)
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { enabled: true, updatedAt: null, inheritedFrom: null }
+    }
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+    const updatedAtFallback = typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null
+    if (!parsed.worktrees) {
+      return {
+        enabled: parsed.enabled !== false,
+        updatedAt: updatedAtFallback,
+        inheritedFrom: null,
+      }
+    }
+
+    const worktreeMap = new Map<string, { enabled: boolean; updatedAt: string; workspaceId?: string }>()
+    for (const [k, v] of Object.entries(parsed.worktrees)) {
+      if (v && typeof v === 'object') {
+        worktreeMap.set(normalizeWorktreePath(k), v)
+      }
+    }
+
+    const parentMap = new Map<string, string>()
+    for (const [k, v] of Object.entries(collectOrcaWorktreeParentMap(cachedOrcaWorktrees))) {
+      parentMap.set(k, v)
+    }
+    for (const [k, v] of Object.entries(parsed.parentPaths || {})) {
+      if (typeof v === 'string' && v) {
+        parentMap.set(normalizeWorktreePath(k), normalizeWorktreePath(v))
+      }
+    }
+    for (const [k, v] of Object.entries(opts.parentPaths || {})) {
+      if (typeof v === 'string' && v) {
+        parentMap.set(normalizeWorktreePath(k), normalizeWorktreePath(v))
+      }
+    }
+
+    const resolvedRawPath = opts.workspacePath || resolveWorkspacePathById(opts.workspaceId) || ''
+    const startPath = normalizeWorktreePath(resolvedRawPath)
+
+    if (!startPath && opts.workspaceId) {
+      for (const info of worktreeMap.values()) {
+        if (info?.workspaceId === opts.workspaceId) {
+          return {
+            enabled: info.enabled !== false,
+            updatedAt: typeof info.updatedAt === 'string' ? info.updatedAt : updatedAtFallback,
+            inheritedFrom: null,
+          }
+        }
+      }
+      return { enabled: true, updatedAt: updatedAtFallback, inheritedFrom: null }
+    }
+
+    const visited = new Set<string>()
+    let curr = startPath
+    while (curr && !visited.has(curr)) {
+      visited.add(curr)
+      const direct = worktreeMap.get(curr)
+      if (direct !== undefined) {
+        return {
+          enabled: direct.enabled !== false,
+          updatedAt: typeof direct.updatedAt === 'string' ? direct.updatedAt : updatedAtFallback,
+          inheritedFrom: curr === startPath ? null : curr,
+        }
+      }
+
+      let nextParent = parentMap.get(curr) || resolveGitMainWorktreePath(curr) || ''
+      let anc = path.dirname(curr)
+      while (anc && anc !== curr && anc !== path.dirname(anc)) {
+        const ancEntry = worktreeMap.get(anc)
+        if (ancEntry !== undefined) {
+          return {
+            enabled: ancEntry.enabled !== false,
+            updatedAt: typeof ancEntry.updatedAt === 'string' ? ancEntry.updatedAt : updatedAtFallback,
+            inheritedFrom: anc,
+          }
+        }
+        if (!nextParent) {
+          nextParent = parentMap.get(anc) || resolveGitMainWorktreePath(anc) || ''
+        }
+        anc = path.dirname(anc)
+      }
+
+      if (nextParent && !visited.has(nextParent)) {
+        curr = nextParent
+        continue
+      }
+      break
+    }
+
+    return { enabled: true, updatedAt: updatedAtFallback, inheritedFrom: null }
+  } catch {
+    return { enabled: true, updatedAt: null, inheritedFrom: null }
+  }
+}
+
+export function setSandboxMode(
+  enabled: boolean,
+  options?: SandboxModeQueryOptions,
+  homeDir = os.homedir()
+): SandboxModeState {
+  const filePath = getSandboxModeFilePath(homeDir)
+  const updatedAt = new Date().toISOString()
+  let existing: SandboxModeFileData = {}
+  try {
+    if (fs.existsSync(filePath)) {
+      existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+    }
+  } catch {}
+
+  const worktrees: Record<string, { enabled: boolean; updatedAt: string; workspaceId?: string }> = {}
+  for (const [k, v] of Object.entries(existing.worktrees || {})) {
+    if (v && typeof v === 'object') {
+      worktrees[normalizeWorktreePath(k)] = v
+    }
+  }
+
+  const parentPaths: Record<string, string> = {}
+  for (const [k, v] of Object.entries(collectOrcaWorktreeParentMap(cachedOrcaWorktrees))) {
+    parentPaths[k] = v
+  }
+  for (const [k, v] of Object.entries(existing.parentPaths || {})) {
+    if (typeof v === 'string' && v) {
+      parentPaths[normalizeWorktreePath(k)] = normalizeWorktreePath(v)
+    }
+  }
+  for (const [k, v] of Object.entries(options?.parentPaths || {})) {
+    if (typeof v === 'string' && v) {
+      parentPaths[normalizeWorktreePath(k)] = normalizeWorktreePath(v)
+    }
+  }
+
+  const targetRaw = options?.workspacePath || resolveWorkspacePathById(options?.workspaceId) || process.cwd()
+  const targetKey = normalizeWorktreePath(targetRaw)
+
+  // Propagate parent setting to existing child workspaces by clearing stale child overrides
+  const parentMap = new Map<string, string>(Object.entries(parentPaths))
+  for (const existingKey of Object.keys(worktrees)) {
+    if (existingKey !== targetKey && doesPathDescendFrom(existingKey, targetKey, parentMap)) {
+      delete worktrees[existingKey]
+    }
+  }
+
+  worktrees[targetKey] = {
+    enabled: Boolean(enabled),
+    updatedAt,
+    ...(options?.workspaceId ? { workspaceId: options.workspaceId } : {}),
+  }
+
+  const nextData: SandboxModeFileData = {
+    updatedAt,
+    ...(existing.tabIdleTimeouts && Object.keys(existing.tabIdleTimeouts).length > 0
+      ? { tabIdleTimeouts: existing.tabIdleTimeouts }
+      : {}),
+    worktrees,
+    ...(Object.keys(parentPaths).length > 0 ? { parentPaths } : {}),
+  }
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, JSON.stringify(nextData, null, 2) + '\n', 'utf8')
+  return getSandboxMode(
+    { workspacePath: targetKey, workspaceId: options?.workspaceId, parentPaths },
+    homeDir
+  )
+}
+
+export const DEFAULT_SANDBOX_IDLE_TIMEOUT_SEC = 300
+
+export interface SandboxIdleTimeoutOptions {
+  sandboxName?: string | null
+  agentSessionId?: string | null
+  terminalId?: string | null
+  paneKey?: string | null
+  workspacePath?: string | null
+  agent?: string | null
+}
+
+function resolveTabIdleTimeoutKeys(
+  options?: SandboxIdleTimeoutOptions,
+  homeDir = os.homedir()
+): string[] {
+  const sbName = String(options?.sandboxName || '').trim()
+  let sessId = String(
+    options?.agentSessionId || extractAgentSessionIdFromPaneKey(options?.paneKey) || ''
+  ).trim()
+  const rawTerm = String(options?.terminalId || options?.paneKey || '').trim()
+  let termPrefix = rawTerm.includes(':') ? rawTerm.split(':')[0] : rawTerm
+
+  if (sbName) {
+    const regMeta = readSandboxRegistryMap(homeDir).get(sbName)
+    if (!sessId && regMeta?.agentSessionId) {
+      sessId = regMeta.agentSessionId.trim()
+    }
+    if (!termPrefix && regMeta?.terminalId) {
+      termPrefix = regMeta.terminalId.includes(':')
+        ? regMeta.terminalId.split(':')[0]
+        : regMeta.terminalId
+    }
+  }
+
+  const keys: string[] = []
+  if (sbName) keys.push(`sandbox:${sbName}`)
+  if (sessId) keys.push(`session:${sessId}`)
+  if (termPrefix) keys.push(`terminal:${termPrefix}`)
+
+  if (keys.length === 0 && options?.workspacePath) {
+    const normWs = normalizeWorktreePath(options.workspacePath)
+    const normAgent = normalizeAgentId(options.agent || undefined) || 'default'
+    if (normWs) {
+      keys.push(`unassigned:${normWs}:${normAgent}`)
+    }
+  }
+  return keys
+}
+
+export function getSandboxIdleTimeoutSeconds(
+  optionsOrHomeDir?: SandboxIdleTimeoutOptions | string,
+  homeDirArg = os.homedir()
+): number {
+  const envVal = process.env.ORCA_SANDBOX_IDLE_TIMEOUT_SEC
+  if (envVal !== undefined && envVal.trim() !== '') {
+    const parsedEnv = Number(envVal)
+    if (Number.isFinite(parsedEnv) && parsedEnv >= 0) {
+      return Math.floor(parsedEnv)
+    }
+  }
+  const opts: SandboxIdleTimeoutOptions =
+    typeof optionsOrHomeDir === 'string' ? {} : (optionsOrHomeDir || {})
+  const homeDir = typeof optionsOrHomeDir === 'string' ? optionsOrHomeDir : homeDirArg
+  const filePath = getSandboxModeFilePath(homeDir)
+  try {
+    if (!fs.existsSync(filePath)) return DEFAULT_SANDBOX_IDLE_TIMEOUT_SEC
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+    const tabMap = parsed.tabIdleTimeouts
+    if (tabMap && typeof tabMap === 'object') {
+      const candidateKeys = resolveTabIdleTimeoutKeys(opts, homeDir)
+      for (const key of candidateKeys) {
+        const entry = tabMap[key]
+        if (
+          entry &&
+          typeof entry.seconds === 'number' &&
+          Number.isFinite(entry.seconds) &&
+          entry.seconds >= 0
+        ) {
+          return Math.floor(entry.seconds)
+        }
+      }
+    }
+  } catch {}
+  return DEFAULT_SANDBOX_IDLE_TIMEOUT_SEC
+}
+
+export function setSandboxIdleTimeoutSeconds(
+  seconds: number,
+  optionsOrHomeDir?: SandboxIdleTimeoutOptions | string,
+  homeDirArg = os.homedir()
+): number {
+  const normalized =
+    Number.isFinite(seconds) && seconds >= 0 ? Math.floor(seconds) : DEFAULT_SANDBOX_IDLE_TIMEOUT_SEC
+  const opts: SandboxIdleTimeoutOptions =
+    typeof optionsOrHomeDir === 'string' ? {} : (optionsOrHomeDir || {})
+  const homeDir = typeof optionsOrHomeDir === 'string' ? optionsOrHomeDir : homeDirArg
+  const filePath = getSandboxModeFilePath(homeDir)
+  let existing: SandboxModeFileData = {}
+  try {
+    if (fs.existsSync(filePath)) {
+      existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+    }
+  } catch {}
+
+  const updatedAt = new Date().toISOString()
+  const tabIdleTimeouts: Record<string, { seconds: number; updatedAt: string }> = {
+    ...(existing.tabIdleTimeouts || {}),
+  }
+  const keys = resolveTabIdleTimeoutKeys(opts, homeDir)
+  const targetKeys = keys.length > 0 ? keys : ['unassigned:default']
+  for (const key of targetKeys) {
+    tabIdleTimeouts[key] = { seconds: normalized, updatedAt }
+  }
+
+  const { idleTimeoutSeconds: _legacyGlobalTimeout, ...restExisting } = existing
+  const nextData: SandboxModeFileData = {
+    ...restExisting,
+    updatedAt,
+    tabIdleTimeouts,
+  }
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, JSON.stringify(nextData, null, 2) + '\n', 'utf8')
+  return normalized
+}
+
+export function pruneSandboxIdleTimeout(sandboxName: string, homeDir = os.homedir()): void {
+  if (!sandboxName) return
+  const filePath = getSandboxModeFilePath(homeDir)
+  try {
+    if (!fs.existsSync(filePath)) return
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+    const sbKey = `sandbox:${sandboxName}`
+    if (parsed?.tabIdleTimeouts && sbKey in parsed.tabIdleTimeouts) {
+      delete parsed.tabIdleTimeouts[sbKey]
+      fs.writeFileSync(filePath, JSON.stringify(parsed, null, 2) + '\n', 'utf8')
+    }
+  } catch {}
+}
+
+export interface SessionEgressEntry {
+  sandboxName?: string
+  workspacePath: string
+  agent: 'claude' | 'codex' | 'antigravity'
+  ruleName: string
+  host: string
+  port: number
+  action: 'allow' | 'deny'
+  method: string
+  path: string
+  binary: string
+  triggerCommand?: string
+  createdAt: string
+}
+
+export function getSessionEgressFilePath(homeDir = os.homedir()): string {
+  if (process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE) {
+    return process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE
+  }
+  return path.join(homeDir, '.config', 'orca-openshell', 'session-egress.json')
+}
+
+export function readSessionEgressEntries(homeDir = os.homedir()): SessionEgressEntry[] {
+  const filePath = getSessionEgressFilePath(homeDir)
+  try {
+    if (!fs.existsSync(filePath)) return []
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as { entries?: SessionEgressEntry[] }
+    return Array.isArray(parsed?.entries) ? parsed.entries : []
+  } catch {
+    return []
+  }
+}
+
+export function writeSessionEgressEntries(entries: SessionEgressEntry[], homeDir = os.homedir()): void {
+  const filePath = getSessionEgressFilePath(homeDir)
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, JSON.stringify({ entries }, null, 2) + '\n', 'utf8')
+}
+
+export function recordSessionEgressRule(entry: SessionEgressEntry, homeDir = os.homedir()): void {
+  const entries = readSessionEgressEntries(homeDir)
+  const normHost = entry.host.toLowerCase()
+  const idx = entries.findIndex(
+    e =>
+      (e.sandboxName || '') === (entry.sandboxName || '') &&
+      e.workspacePath === entry.workspacePath &&
+      e.agent === entry.agent &&
+      e.host.toLowerCase() === normHost &&
+      e.port === entry.port &&
+      e.method === entry.method &&
+      e.path === entry.path
+  )
+  if (idx >= 0) {
+    entries[idx] = { ...entries[idx], ...entry }
+  } else {
+    entries.push(entry)
+  }
+  writeSessionEgressEntries(entries, homeDir)
+}
+
+export function removeSessionEgressRule(
+  criteria: { sandboxName?: string; workspacePath?: string; host: string; port?: number; method?: string; path?: string },
+  homeDir = os.homedir()
+): boolean {
+  const entries = readSessionEgressEntries(homeDir)
+  const normHost = criteria.host.toLowerCase()
+  const filtered = entries.filter(e => {
+    if (criteria.sandboxName !== undefined && (e.sandboxName || '') !== criteria.sandboxName) return true
+    if (criteria.workspacePath && e.workspacePath !== criteria.workspacePath) return true
+    if (e.host.toLowerCase() !== normHost) return true
+    if (criteria.port !== undefined && e.port !== criteria.port) return true
+    if (criteria.method && e.method !== criteria.method.toUpperCase()) return true
+    if (criteria.path && e.path !== criteria.path) return true
+    return false
+  })
+  if (filtered.length !== entries.length) {
+    writeSessionEgressEntries(filtered, homeDir)
+    return true
+  }
+  return false
+}
+
+export function pruneSandboxSessionEgress(sandboxName: string, homeDir = os.homedir()): void {
+  if (!sandboxName) return
+  const entries = readSessionEgressEntries(homeDir)
+  const filtered = entries.filter(e => e.sandboxName !== sandboxName)
+  if (filtered.length !== entries.length) {
+    writeSessionEgressEntries(filtered, homeDir)
+  }
 }
 
 export interface L7PolicySuggestion {
@@ -622,26 +1233,6 @@ export interface CurrentOrcaContext {
   activeAgentSessions: ActiveAgentSessionInfo[]
 }
 
-interface OrcaWorktreePsEntry {
-  worktreeId?: string
-  path?: string
-  repo?: string
-  displayName?: string
-  branch?: string | null
-  isActive?: boolean
-  agents?: Array<{
-    paneKey?: string | null
-    state?: string
-    agentType?: string
-    conversationName?: string | null
-    updatedAt?: number
-  }>
-}
-
-let cachedOrcaWorktrees: OrcaWorktreePsEntry[] = []
-let lastOrcaRefreshAt = 0
-let orcaRefreshInFlight: Promise<void> | null = null
-
 let cachedSandboxes: ActiveSandboxInfo[] = []
 let lastSandboxRefreshAt = 0
 let sandboxRefreshInFlight: Promise<void> | null = null
@@ -722,7 +1313,7 @@ async function queryOrcaWorktreePsViaSocket(homeDir = os.homedir(), timeoutMs = 
           id: reqId,
           authToken: metadata.authToken,
           method: 'worktree.ps',
-          params: { limit: 15 },
+          params: { limit: 100 },
         })}\n`)
       } catch {
         finish(null)
@@ -742,6 +1333,7 @@ export async function refreshOrcaContextCache(homeDir = os.homedir()): Promise<v
       if (worktrees && worktrees.length > 0) {
         cachedOrcaWorktrees = worktrees
         lastOrcaRefreshAt = Date.now()
+        syncOrcaWorktreeLineage(worktrees, homeDir)
       }
     } catch {} finally {
       orcaRefreshInFlight = null
@@ -750,7 +1342,33 @@ export async function refreshOrcaContextCache(homeDir = os.homedir()): Promise<v
   return orcaRefreshInFlight
 }
 
+function inferSandboxAgent(name: string): string {
+  if (name.startsWith('cc-')) return 'claude'
+  if (name.startsWith('cx-')) return 'codex'
+  if (name.startsWith('ag-')) return 'antigravity'
+  return 'custom'
+}
+
 function parseSandboxListOutput(out: string): ActiveSandboxInfo[] {
+  const trimmed = out.trim()
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        sandboxes?: Array<{ name?: string; created_at?: string; phase?: string }>
+      }
+      if (Array.isArray(parsed.sandboxes)) {
+        return parsed.sandboxes
+          .filter(s => typeof s?.name === 'string' && s.name.length > 0)
+          .map(s => ({
+            name: s.name!,
+            created: typeof s.created_at === 'string' ? s.created_at : '',
+            phase: typeof s.phase === 'string' && s.phase ? s.phase : 'Unknown',
+            agent: inferSandboxAgent(s.name!),
+          }))
+      }
+    } catch {}
+  }
+
   const lines = out
     .split(/\r?\n/)
     .map(l => l.trim())
@@ -760,24 +1378,17 @@ function parseSandboxListOutput(out: string): ActiveSandboxInfo[] {
     const name = parts[0] || line.split(/\s+/)[0] || ''
     const created = parts[1] || ''
     const phase = parts[2] || 'Unknown'
-    const agent = name.startsWith('cc-')
-      ? 'claude'
-      : name.startsWith('cx-')
-        ? 'codex'
-        : name.startsWith('ag-')
-          ? 'antigravity'
-          : 'custom'
-    return { name, created, phase, agent }
+    return { name, created, phase, agent: inferSandboxAgent(name) }
   })
 }
 
-export async function refreshActiveSandboxesCache(): Promise<void> {
+export async function refreshActiveSandboxesCache(force = false): Promise<void> {
   const now = Date.now()
   if (sandboxRefreshInFlight) return sandboxRefreshInFlight
-  if (now - lastSandboxRefreshAt < 2000) return
+  if (!force && now - lastSandboxRefreshAt < 2000) return
 
   sandboxRefreshInFlight = new Promise<void>((resolve) => {
-    execFile('openshell', ['sandbox', 'list'], { timeout: 2000 }, (err, stdout) => {
+    execFile('openshell', ['sandbox', 'list', '-o', 'json'], { timeout: 2500 }, (err, stdout) => {
       if (!err && typeof stdout === 'string') {
         cachedSandboxes = parseSandboxListOutput(stdout)
         lastSandboxRefreshAt = Date.now()
@@ -789,6 +1400,284 @@ export async function refreshActiveSandboxesCache(): Promise<void> {
   return sandboxRefreshInFlight
 }
 
+export async function pauseActiveSandbox(sandboxName: string): Promise<{ ok: boolean; message: string }> {
+  const cleanName = String(sandboxName || '').trim()
+  if (!/^[a-z0-9][a-z0-9-]{0,30}$/.test(cleanName)) {
+    return { ok: false, message: `Invalid sandbox name "${sandboxName}".` }
+  }
+  return new Promise((resolve) => {
+    execFile('openshell', ['sandbox', 'stop', cleanName], { timeout: 25000 }, async (err, _stdout, stderr) => {
+      await refreshActiveSandboxesCache(true)
+      if (err) {
+        resolve({
+          ok: false,
+          message: String(stderr || err.message || `Failed to pause sandbox ${cleanName}`).trim(),
+        })
+        return
+      }
+      resolve({ ok: true, message: `Paused sandbox ${cleanName} (filesystem & policies preserved).` })
+    })
+  })
+}
+
+export async function resumeActiveSandbox(sandboxName: string): Promise<{ ok: boolean; message: string }> {
+  const cleanName = String(sandboxName || '').trim()
+  if (!/^[a-z0-9][a-z0-9-]{0,30}$/.test(cleanName)) {
+    return { ok: false, message: `Invalid sandbox name "${sandboxName}".` }
+  }
+  return new Promise((resolve) => {
+    execFile('openshell', ['sandbox', 'start', cleanName], { timeout: 35000 }, async (err, _stdout, stderr) => {
+      await refreshActiveSandboxesCache(true)
+      if (err) {
+        resolve({
+          ok: false,
+          message: String(stderr || err.message || `Failed to resume sandbox ${cleanName}`).trim(),
+        })
+        return
+      }
+      resolve({ ok: true, message: `Resumed sandbox ${cleanName}.` })
+    })
+  })
+}
+
+export interface SandboxRegistryEntry {
+  sandboxName: string
+  agent: 'claude' | 'codex' | 'antigravity'
+  workspacePath: string
+  workspaceId?: string
+  terminalId?: string
+  agentSessionId?: string
+  pid?: number
+  createdAt?: string
+  updatedAt?: string
+}
+
+export function getSandboxRegistryFilePath(homeDir = os.homedir()): string {
+  if (process.env.ORCA_OPENSHELL_REGISTRY_FILE) {
+    return process.env.ORCA_OPENSHELL_REGISTRY_FILE
+  }
+  return path.join(homeDir, '.config', 'orca-openshell', 'sandbox-registry.json')
+}
+
+function isHostPidAlive(pid?: number): boolean {
+  if (pid === undefined || pid === null || pid <= 0) return true
+  if (!Number.isFinite(pid) || pid <= 1) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function pruneSandboxRegistryEntry(sandboxName: string, homeDir = os.homedir()): void {
+  if (!sandboxName) return
+  pruneSandboxIdleTimeout(sandboxName, homeDir)
+  const regPath = getSandboxRegistryFilePath(homeDir)
+  try {
+    if (!fs.existsSync(regPath)) return
+    const parsed = JSON.parse(fs.readFileSync(regPath, 'utf8')) as { entries?: SandboxRegistryEntry[] }
+    if (!Array.isArray(parsed?.entries)) return
+    const filtered = parsed.entries.filter(e => e?.sandboxName && e.sandboxName !== sandboxName)
+    if (filtered.length !== parsed.entries.length) {
+      fs.writeFileSync(regPath, JSON.stringify({ entries: filtered }, null, 2) + '\n', 'utf8')
+    }
+  } catch {}
+}
+
+function readSandboxRegistryMap(homeDir = os.homedir()): Map<string, SandboxRegistryEntry> {
+  const map = new Map<string, SandboxRegistryEntry>()
+  const regPath = getSandboxRegistryFilePath(homeDir)
+  try {
+    if (fs.existsSync(regPath)) {
+      const parsed = JSON.parse(fs.readFileSync(regPath, 'utf8')) as { entries?: SandboxRegistryEntry[] }
+      for (const entry of parsed?.entries ?? []) {
+        if (entry?.sandboxName && isHostPidAlive(entry.pid)) {
+          map.set(entry.sandboxName, entry)
+        }
+      }
+    }
+  } catch {}
+
+  const launchesDir = path.join(homeDir, '.agents', 'orca-openshell-delegation', 'launches')
+  try {
+    if (fs.existsSync(launchesDir)) {
+      for (const file of fs.readdirSync(launchesDir)) {
+        if (!file.endsWith('.json')) continue
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(launchesDir, file), 'utf8')) as {
+            terminal?: string
+            workspace?: string
+            sandbox?: string
+          }
+          if (!data?.sandbox) continue
+          const existing = map.get(data.sandbox)
+          if (existing) {
+            if (!existing.terminalId && data.terminal) existing.terminalId = data.terminal
+            if (!existing.workspaceId && data.workspace) existing.workspaceId = data.workspace
+          } else {
+            const wsPath = extractPathFromWorkspaceId(data.workspace) || ''
+            const inferred = inferSandboxAgent(data.sandbox)
+            if (inferred === 'claude' || inferred === 'codex' || inferred === 'antigravity') {
+              map.set(data.sandbox, {
+                sandboxName: data.sandbox,
+                agent: inferred,
+                workspacePath: wsPath,
+                ...(data.workspace ? { workspaceId: data.workspace } : {}),
+                ...(data.terminal ? { terminalId: data.terminal } : {}),
+              })
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  if (!process.env.ORCA_OPENSHELL_REGISTRY_FILE) {
+    try {
+      for (const rootDir of ['/tmp', '/private/tmp']) {
+        if (!fs.existsSync(rootDir)) continue
+        for (const agBase of fs.readdirSync(rootDir)) {
+          if (!agBase.startsWith('orca-ag-openshell-')) continue
+          const fullBase = path.join(rootDir, agBase)
+          for (const sessKey of fs.readdirSync(fullBase)) {
+            const stateFile = path.join(fullBase, sessKey, 'state.json')
+            if (!fs.existsSync(stateFile)) continue
+            try {
+              const st = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
+                sandboxName?: string
+                projectRoot?: string
+                daemonPid?: number
+              }
+              if (st?.sandboxName && !map.has(st.sandboxName) && isHostPidAlive(st.daemonPid)) {
+                map.set(st.sandboxName, {
+                  sandboxName: st.sandboxName,
+                  agent: 'antigravity',
+                  workspacePath: st.projectRoot || '',
+                  ...(sessKey.startsWith('antigravity_') ? { agentSessionId: sessKey } : {}),
+                  pid: st.daemonPid,
+                })
+              }
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return map
+}
+
+export function extractAgentSessionIdFromPaneKey(paneKey?: string | null): string | null {
+  if (!paneKey) return null
+  const prefix = 'structured-agent-session-'
+  if (paneKey.startsWith(prefix)) {
+    const rest = paneKey.slice(prefix.length)
+    const colonIdx = rest.indexOf(':')
+    const id = colonIdx >= 0 ? rest.slice(0, colonIdx) : rest
+    return id || null
+  }
+  return null
+}
+
+function expectedWorkspaceSandboxPrefix(
+  agent: 'claude' | 'codex' | 'antigravity',
+  workspacePath: string
+): string {
+  const prefix = agent === 'claude' ? 'cc' : agent === 'codex' ? 'cx' : 'ag'
+  const projectName = path.basename(workspacePath)
+  const safeProj = projectName.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()
+  const truncated = safeProj.slice(0, 8).replace(/^-+|-+$/g, '') || 'ws'
+  return `${prefix}-${truncated.slice(0, 6)}-`
+}
+
+/**
+ * Resolves ONLY the OpenShell sandbox running for the currently active tab in `selectedWorkspace`.
+ * Never leaks sandboxes belonging to other repositories, background probes, or other tabs.
+ */
+export function resolveCurrentTabSandbox(params: {
+  allSandboxes: ActiveSandboxInfo[]
+  selectedWorkspace: WorkspaceEntry
+  currentAgent: 'claude' | 'codex' | 'antigravity'
+  activeAgentSessions: ActiveAgentSessionInfo[]
+  homeDir?: string
+}): ActiveSandboxInfo[] {
+  const { allSandboxes, selectedWorkspace, currentAgent, activeAgentSessions } = params
+  if (allSandboxes.length === 0) return []
+
+  const registry = readSandboxRegistryMap(params.homeDir)
+  const activeSession = activeAgentSessions[0] || null
+  const activeAgentSessionId = extractAgentSessionIdFromPaneKey(activeSession?.paneKey)
+  const activePaneKey = activeSession?.paneKey || null
+  const activePanePrefix = activePaneKey && activePaneKey.includes(':')
+    ? activePaneKey.split(':')[0]
+    : activePaneKey
+
+  // 1. Exact match by structured chat session ID (ORCA_AGENT_SESSION_ID)
+  if (activeAgentSessionId) {
+    const exactBySession = allSandboxes.find(
+      sb => registry.get(sb.name)?.agentSessionId === activeAgentSessionId
+    )
+    if (exactBySession) return [exactBySession]
+  }
+
+  // 2. Exact match by terminal pane / handle ID (OPENSHELL_BRIDGE_TERMINAL_ID)
+  if (activePaneKey) {
+    const exactByTerminal = allSandboxes.find(sb => {
+      const term = registry.get(sb.name)?.terminalId
+      return Boolean(term && (term === activePaneKey || term === activePanePrefix))
+    })
+    if (exactByTerminal) return [exactByTerminal]
+  }
+
+  // 3. Fallback: match sandboxes owned by this workspace + currentAgent (excluding sandboxes bound to another tab)
+  const normWsPath = normalizeWorktreePath(selectedWorkspace.path)
+  const slugPrefix = expectedWorkspaceSandboxPrefix(currentAgent, normWsPath || selectedWorkspace.path)
+
+  const workspaceMatches = allSandboxes.filter(sb => {
+    if (sb.agent !== currentAgent) return false
+    const meta = registry.get(sb.name)
+    if (meta) {
+      if (activeAgentSessionId && meta.agentSessionId && meta.agentSessionId !== activeAgentSessionId) {
+        return false
+      }
+      if (activePaneKey && meta.terminalId && meta.terminalId !== activePaneKey && meta.terminalId !== activePanePrefix) {
+        return false
+      }
+      const pathMatch = Boolean(meta.workspacePath && normalizeWorktreePath(meta.workspacePath) === normWsPath)
+      const idMatch = Boolean(meta.workspaceId && meta.workspaceId === selectedWorkspace.id)
+      return pathMatch || idMatch
+    }
+    return sb.name.startsWith(slugPrefix)
+  })
+
+  if (workspaceMatches.length === 0) return []
+  workspaceMatches.sort((a, b) => String(b.created || '').localeCompare(String(a.created || '')))
+  return [workspaceMatches[0]]
+}
+
+export async function stopActiveSandbox(sandboxName: string): Promise<{ ok: boolean; message: string }> {
+  const cleanName = String(sandboxName || '').trim()
+  if (!/^[a-z0-9][a-z0-9-]{0,30}$/.test(cleanName)) {
+    return { ok: false, message: `Invalid sandbox name "${sandboxName}".` }
+  }
+  return new Promise((resolve) => {
+    execFile('openshell', ['sandbox', 'delete', cleanName], { timeout: 10000 }, async (err, _stdout, stderr) => {
+      pruneSandboxSessionEgress(cleanName)
+      pruneSandboxRegistryEntry(cleanName)
+      await refreshActiveSandboxesCache(true)
+      if (err) {
+        resolve({
+          ok: false,
+          message: String(stderr || err.message || `Failed to delete sandbox ${cleanName}`).trim(),
+        })
+        return
+      }
+      resolve({ ok: true, message: `Deleted sandbox ${cleanName}.` })
+    })
+  })
+}
+
 /**
  * Queries Orca for the currently active worktree and detects the currently running/active agent in that worktree.
  * Uses the non-blocking socket RPC cache so the Orca worker event loop is never blocked by synchronous CLI spawns.
@@ -796,6 +1685,7 @@ export async function refreshActiveSandboxesCache(): Promise<void> {
 export function discoverCurrentOrcaContext(options?: {
   workspacePath?: string
   agent?: string
+  fallbackAgent?: string
   homeDir?: string
 }): CurrentOrcaContext {
   let activeWorkspace: WorkspaceEntry | null = null
@@ -811,10 +1701,10 @@ export function discoverCurrentOrcaContext(options?: {
     void refreshOrcaContextCache(options?.homeDir)
 
     const worktrees = cachedOrcaWorktrees
-    const targetWt =
-      (options?.workspacePath ? worktrees.find(w => w.path === options.workspacePath) : undefined) ||
-      worktrees.find(w => w.isActive) ||
-      worktrees[0]
+    const normReqPath = options?.workspacePath ? normalizeWorktreePath(options.workspacePath) : ''
+    const targetWt = normReqPath
+      ? worktrees.find(w => normalizeWorktreePath(w.path) === normReqPath)
+      : (worktrees.find(w => w.isActive) || worktrees[0])
 
     if (targetWt?.path) {
       activeWorkspace = {
@@ -860,6 +1750,10 @@ export function discoverCurrentOrcaContext(options?: {
 
   if (!detectedAgent && activeAgentSessions.length > 0) {
     detectedAgent = activeAgentSessions[0].agent
+  }
+
+  if (!detectedAgent && options?.fallbackAgent) {
+    detectedAgent = normalizeAgentId(options.fallbackAgent)
   }
 
   // Also check running OpenShell sandboxes if no agent session was found via worktree ps
@@ -957,6 +1851,7 @@ export function inspectNativeSync(workspacePath: string): NativeAgentSyncStatus 
 export async function buildPolicyReportAsync(options?: {
   workspacePath?: string
   agent?: string
+  fallbackAgent?: string
   homeDir?: string
   binDir?: string
   orcaPolicyDir?: string
@@ -971,6 +1866,7 @@ export async function buildPolicyReportAsync(options?: {
 export function buildPolicyReport(options?: {
   workspacePath?: string
   agent?: string
+  fallbackAgent?: string
   homeDir?: string
   binDir?: string
   orcaPolicyDir?: string
@@ -985,10 +1881,21 @@ export function buildPolicyReport(options?: {
   const context = discoverCurrentOrcaContext({
     workspacePath: options?.workspacePath,
     agent: options?.agent,
+    fallbackAgent: options?.fallbackAgent,
     homeDir,
   })
   const selectedWorkspace = context.workspace
   const currentAgent = context.currentAgent
+
+  const allSandboxesNow = listActiveSandboxes()
+  const activeSandboxes = resolveCurrentTabSandbox({
+    allSandboxes: allSandboxesNow,
+    selectedWorkspace,
+    currentAgent,
+    activeAgentSessions: context.activeAgentSessions,
+    homeDir,
+  })
+  const currentTabSandbox = activeSandboxes[0] || null
 
   const reqQueueDir = path.join(selectedWorkspace.path, '.orca-openshell-l7-requests')
   if (fs.existsSync(reqQueueDir)) {
@@ -997,12 +1904,13 @@ export function buildPolicyReport(options?: {
       for (const file of files) {
         const fullPath = path.join(reqQueueDir, file)
         try {
-          const req = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as Partial<AddL7PolicyRequest>
+          const req = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as Partial<AddL7PolicyRequest> & { sandbox?: string }
           fs.unlinkSync(fullPath)
           if (req.host) {
             addL7Policy(
               {
                 scope: req.scope || 'session',
+                sandboxName: req.sandboxName || req.sandbox || currentTabSandbox?.name,
                 host: req.host,
                 port: req.port,
                 action: req.action || 'allow',
@@ -1034,10 +1942,30 @@ export function buildPolicyReport(options?: {
     try {
       for (const file of fs.readdirSync(projectPolicyDir).sort()) {
         if (file.endsWith('.yaml') || file.endsWith('.yml') || file.endsWith('.json')) {
-          projectPolicies.push(parseOpenShellPolicyFile(path.join(projectPolicyDir, file)))
+          const parsed = parseOpenShellPolicyFile(path.join(projectPolicyDir, file))
+          parsed.endpoints = parsed.endpoints.map(ep => ({
+            ...ep,
+            ruleScope: 'project' as const,
+            temporary: false,
+            sourcePath: `.agents/policies/${file}`,
+          }))
+          projectPolicies.push(parsed)
         }
       }
     } catch {}
+  }
+
+  const activeSandboxNames = new Set(allSandboxesNow.map(s => s.name))
+  const rawSessionEntries = readSessionEgressEntries(homeDir)
+  const validSessionEntries = rawSessionEntries.filter(entry => {
+    if (!entry.sandboxName) return true
+    if (activeSandboxNames.has(entry.sandboxName)) return true
+    if (allSandboxesNow.length === 0) return true
+    const ageMs = Date.now() - (Date.parse(entry.createdAt) || 0)
+    return ageMs < 30000
+  })
+  if (validSessionEntries.length !== rawSessionEntries.length) {
+    writeSessionEgressEntries(validSessionEntries, homeDir)
   }
 
   const buildAgentPolicy = (
@@ -1068,7 +1996,67 @@ export function buildPolicyReport(options?: {
       ...projectPolicies.flatMap(p => p.readWrite),
     ])
 
+    const agentSessionEntries = validSessionEntries.filter(e => {
+      if (currentTabSandbox) {
+        return e.sandboxName === currentTabSandbox.name
+      }
+      return !e.sandboxName && e.workspacePath === selectedWorkspace.path && e.agent === agent
+    })
+    const sessionEndpointsByHost = new Map<string, NetworkEndpointRule>()
+    for (const entry of agentSessionEntries) {
+      const key = `${entry.host.toLowerCase()}:${entry.port}`
+      const l7Rule: L7HttpRule = {
+        action: entry.action,
+        method: entry.method,
+        path: entry.path,
+      }
+      const existing = sessionEndpointsByHost.get(key)
+      if (existing) {
+        existing.l7Rules = existing.l7Rules || []
+        if (!existing.l7Rules.some(r => r.action === l7Rule.action && r.method === l7Rule.method && r.path === l7Rule.path)) {
+          existing.l7Rules.push(l7Rule)
+        }
+      } else {
+        const bins = entry.binary === '*'
+          ? ['/usr/bin/curl', '/usr/bin/git', '/usr/local/bin/node', '/usr/bin/python3', '/usr/bin/gh']
+          : [entry.binary]
+        const rel = describeEndpointRelation({
+          host: entry.host,
+          port: entry.port,
+          policyName: entry.ruleName,
+          source: 'session-temporary',
+          binaries: bins,
+          l7Rules: [l7Rule],
+          triggerCommand: entry.triggerCommand,
+        })
+        sessionEndpointsByHost.set(key, {
+          policyName: entry.ruleName,
+          source: entry.sandboxName ? `session (${entry.sandboxName})` : 'session-temporary',
+          sourcePath: entry.sandboxName
+            ? `Temporary rule on sandbox ${entry.sandboxName}`
+            : 'Temporary rule (active session)',
+          ruleScope: 'temporary',
+          temporary: true,
+          host: entry.host,
+          port: entry.port,
+          protocol: 'rest',
+          access: 'l7-rules',
+          enforcement: 'enforce',
+          binaries: bins,
+          compatibleCliCommands: compatibleCommandsForHost(entry.host),
+          triggerSource: rel.triggerSource,
+          triggerExplanation: rel.triggerExplanation,
+          l7Rules: [l7Rule],
+        })
+      }
+    }
+
     const endpoints: NetworkEndpointRule[] = [
+      ...sessionEndpointsByHost.values(),
+      ...projectPolicies.flatMap(p => p.endpoints),
+      ...orcaPolicy.endpoints.map(ep => ({ ...ep, ruleScope: 'global' as const, temporary: false })),
+      ...agentYamlPolicy.endpoints.map(ep => ({ ...ep, ruleScope: 'global' as const, temporary: false })),
+      ...globalDefaultPolicy.endpoints.map(ep => ({ ...ep, ruleScope: 'global' as const, temporary: false })),
       ...profileEndpoints.map(ep => {
         const portNum = ep.port ?? 443
         const polName = `provider:${providerProfile}`
@@ -1084,6 +2072,8 @@ export function buildPolicyReport(options?: {
           policyName: polName,
           source: srcName,
           sourcePath: `profiles/${srcName}`,
+          ruleScope: 'profile' as const,
+          temporary: false,
           host: ep.host,
           port: portNum,
           protocol: 'rest',
@@ -1095,19 +2085,32 @@ export function buildPolicyReport(options?: {
           triggerExplanation: rel.triggerExplanation,
         }
       }),
-      ...globalDefaultPolicy.endpoints,
-      ...agentYamlPolicy.endpoints,
-      ...orcaPolicy.endpoints,
-      ...projectPolicies.flatMap(p => p.endpoints),
     ]
 
-    const seenEndpoints = new Set<string>()
-    const dedupedEndpoints = endpoints.filter(ep => {
-      const key = `${ep.host}:${ep.port}`
-      if (seenEndpoints.has(key)) return false
-      seenEndpoints.add(key)
-      return true
-    })
+    const mergedByKey = new Map<string, NetworkEndpointRule>()
+    for (const ep of endpoints) {
+      const key = `${ep.host.toLowerCase()}:${ep.port}`
+      const existing = mergedByKey.get(key)
+      if (!existing) {
+        const clone: NetworkEndpointRule = { ...ep }
+        if (ep.l7Rules) {
+          clone.l7Rules = [...ep.l7Rules]
+        } else {
+          delete clone.l7Rules
+        }
+        mergedByKey.set(key, clone)
+        continue
+      }
+      if (ep.l7Rules && ep.l7Rules.length > 0) {
+        existing.l7Rules = existing.l7Rules ? [...existing.l7Rules] : []
+        for (const r of ep.l7Rules) {
+          if (!existing.l7Rules.some(er => er.action === r.action && er.method === r.method && er.path === r.path)) {
+            existing.l7Rules.push(r)
+          }
+        }
+      }
+    }
+    const dedupedEndpoints = [...mergedByKey.values()]
 
     return {
       agent,
@@ -1303,8 +2306,16 @@ export function buildPolicyReport(options?: {
     blockedFlags: ['--environment', '--from', '--server-url', '--token', '--terminal (for worker-start)'],
   }
 
-  const allSandboxes = listActiveSandboxes()
-  const activeSandboxes = allSandboxes.filter(sb => sb.agent === currentAgent)
+  const activeSession = context.activeAgentSessions[0] || null
+  const sandboxIdleTimeoutSeconds = getSandboxIdleTimeoutSeconds(
+    {
+      sandboxName: currentTabSandbox?.name,
+      paneKey: activeSession?.paneKey,
+      workspacePath: selectedWorkspace.path,
+      agent: currentAgent,
+    },
+    homeDir
+  )
 
   const orcaBrokerRules: CliPermissionRule[] = [
     ...delegation.allowedCliCommands.map(c => {
@@ -1341,9 +2352,16 @@ export function buildPolicyReport(options?: {
   ]
 
   const combinedCliRules = [...allCliRules, ...orcaBrokerRules]
+  const sandboxMode = getSandboxMode(
+    { workspacePath: selectedWorkspace.path, workspaceId: selectedWorkspace.id },
+    homeDir
+  )
 
   return {
     generatedAt: new Date().toISOString(),
+    sandboxEnabled: sandboxMode.enabled,
+    sandboxInheritedFrom: sandboxMode.inheritedFrom,
+    sandboxIdleTimeoutSeconds,
     selectedWorkspace,
     currentAgent,
     activeAgentSessions: context.activeAgentSessions,
@@ -1386,6 +2404,13 @@ export function evaluateCommandPolicy(command: string, report: PolicyInspectionR
   let summary = 'Unlisted command — requires interactive confirmation (or allowed inside disposable sandbox).'
 
   const sandboxChecks: CommandEvaluationResult['sandboxChecks'] = []
+  if (report.sandboxEnabled === false) {
+    sandboxChecks.push({
+      layer: 'OpenShell Sandbox',
+      status: 'warn',
+      detail: 'Deactivated (Host Mode) - command runs unsandboxed on host without Landlock or L7 isolation.',
+    })
+  }
 
   // Check if it is an `orca orchestration` shim command
   if (trimmed.startsWith('orca ')) {
@@ -1562,18 +2587,18 @@ export function addL7Policy(
   const cliCommandsRun: string[] = []
   const appliedSandboxes: string[] = []
   let targetFile: string | undefined
+  const wsPath = req.workspacePath || discoverCurrentOrcaContext({ homeDir }).workspace.path
+  const resolvedAgent = normalizeAgentId(req.agent) || discoverCurrentOrcaContext({ homeDir }).currentAgent
 
   // 1. Persist to JSON policy file when scope is 'workspace' or 'global'
   if (req.scope === 'workspace' || req.scope === 'global') {
     if (req.scope === 'workspace') {
-      const wsPath = req.workspacePath || discoverCurrentOrcaContext().workspace.path
       const policyDir = path.join(wsPath, '.agents', 'policies')
       fs.mkdirSync(policyDir, { recursive: true })
       targetFile = path.join(policyDir, 'l7-custom.json')
     } else {
-      const agent = normalizeAgentId(req.agent) || discoverCurrentOrcaContext().currentAgent
       fs.mkdirSync(orcaPolicyDir, { recursive: true })
-      targetFile = path.join(orcaPolicyDir, `${agent}.json`)
+      targetFile = path.join(orcaPolicyDir, `${resolvedAgent}.json`)
     }
 
     let doc: Record<string, any> = {
@@ -1639,16 +2664,36 @@ export function addL7Policy(
     existingPol.endpoints = endpoints
     doc.network_policies[ruleName] = existingPol
     fs.writeFileSync(targetFile, JSON.stringify(doc, null, 2) + '\n', 'utf8')
+
+    // Promote: remove any temporary session rule for this endpoint/path now that it is saved permanently
+    removeSessionEgressRule({ workspacePath: wsPath, host, port }, homeDir)
   }
 
   // 2. Apply dynamically to running sandbox(es) via `openshell policy update`
   const targetSandboxes: string[] = []
+  let resolvedTabSandboxName: string | undefined = req.sandboxName || undefined
   if (req.sandboxName) {
     targetSandboxes.push(req.sandboxName)
-  } else {
-    const agent = normalizeAgentId(req.agent) || discoverCurrentOrcaContext().currentAgent
+  } else if (req.scope === 'global') {
     for (const sb of listActiveSandboxes()) {
-      if (sb.agent === agent && sb.phase.toLowerCase() === 'ready') {
+      if (sb.agent === resolvedAgent && sb.phase.toLowerCase() === 'ready') {
+        targetSandboxes.push(sb.name)
+      }
+    }
+  } else {
+    const ctx = discoverCurrentOrcaContext({ workspacePath: wsPath, agent: resolvedAgent, homeDir })
+    const tabSandboxes = resolveCurrentTabSandbox({
+      allSandboxes: listActiveSandboxes(),
+      selectedWorkspace: ctx.workspace,
+      currentAgent: resolvedAgent,
+      activeAgentSessions: ctx.activeAgentSessions,
+      homeDir,
+    })
+    if (tabSandboxes[0]?.name) {
+      resolvedTabSandboxName = tabSandboxes[0].name
+    }
+    for (const sb of tabSandboxes) {
+      if (sb.phase.toLowerCase() === 'ready') {
         targetSandboxes.push(sb.name)
       }
     }
@@ -1697,16 +2742,7 @@ export function addL7Policy(
     }
   }
 
-  if (req.scope === 'session' && targetSandboxes.length === 0) {
-    return {
-      ok: false,
-      scope: 'session',
-      message: 'No running OpenShell sandbox found for the current agent. Start a sandbox first or save to Workspace / Global policy.',
-      cliCommandsRun,
-    }
-  }
-
-  if (req.scope === 'session' && appliedSandboxes.length === 0 && liveErrors.length > 0) {
+  if (req.scope === 'session' && targetSandboxes.length > 0 && appliedSandboxes.length === 0 && liveErrors.length > 0) {
     return {
       ok: false,
       scope: 'session',
@@ -1715,8 +2751,30 @@ export function addL7Policy(
     }
   }
 
+  if (req.scope === 'session') {
+    recordSessionEgressRule(
+      {
+        sandboxName: appliedSandboxes[0] || resolvedTabSandboxName || undefined,
+        workspacePath: wsPath,
+        agent: resolvedAgent,
+        ruleName,
+        host,
+        port,
+        action,
+        method,
+        path: urlPath,
+        binary,
+        ...(req.triggerCommand?.trim() ? { triggerCommand: req.triggerCommand.trim() } : {}),
+        createdAt: new Date().toISOString(),
+      },
+      homeDir
+    )
+  }
+
   const summaryParts: string[] = []
-  if (targetFile) {
+  if (req.scope === 'session') {
+    summaryParts.push(`Added temporary L7 ${action.toUpperCase()} rule (${method} https://${host}:${port}${urlPath})`)
+  } else if (targetFile) {
     summaryParts.push(`Saved L7 ${action.toUpperCase()} rule (${method} https://${host}:${port}${urlPath}) to ${targetFile}`)
   }
   if (appliedSandboxes.length > 0) {
@@ -1728,9 +2786,41 @@ export function addL7Policy(
   return {
     ok: true,
     scope: req.scope,
-    message: summaryParts.join(' • '),
-    targetFile,
+    message: summaryParts.join(' - '),
+    ...(targetFile ? { targetFile } : {}),
     appliedSandboxes,
     cliCommandsRun,
   }
+}
+
+export function removeTemporaryL7Rule(
+  req: { sandboxName?: string; workspacePath?: string; host: string; port?: number },
+  options?: { homeDir?: string }
+): { ok: boolean } {
+  const homeDir = options?.homeDir || os.homedir()
+  const wsPath = req.workspacePath || discoverCurrentOrcaContext({ homeDir }).workspace.path
+  let targetSandboxName = req.sandboxName
+  if (targetSandboxName === undefined) {
+    const ctx = discoverCurrentOrcaContext({ workspacePath: wsPath, homeDir })
+    const tabSb = resolveCurrentTabSandbox({
+      allSandboxes: listActiveSandboxes(),
+      selectedWorkspace: ctx.workspace,
+      currentAgent: ctx.currentAgent,
+      activeAgentSessions: ctx.activeAgentSessions,
+      homeDir,
+    })[0]
+    if (tabSb?.name) {
+      targetSandboxName = tabSb.name
+    }
+  }
+  const removed = removeSessionEgressRule(
+    {
+      ...(targetSandboxName !== undefined ? { sandboxName: targetSandboxName } : {}),
+      workspacePath: wsPath,
+      host: req.host,
+      port: req.port,
+    },
+    homeDir
+  )
+  return { ok: removed }
 }

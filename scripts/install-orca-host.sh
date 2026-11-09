@@ -107,20 +107,32 @@ SELF_DIR="\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)"
 REAL_BIN="\$SELF_DIR/localharness_external.real"
 SHIM_DIR="\$HOME/.config/orca-openshell/ag-shim"
 
-unset BAO_TOKEN BAO_ADDR BEADS_DOLT_PASSWORD DOLT_PASSWORD SOPS_AGE_KEY_FILE
-unset SSH_AUTH_SOCK GITHUB_TOKEN GH_TOKEN OPENAI_API_KEY ANTHROPIC_API_KEY
-unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+SANDBOX_ENABLED=1
+case "\$PWD" in
+  */orca-chat-name-*)
+    exec "\$REAL_BIN" "\$@"
+    ;;
+esac
+if ! AG_SANDBOX_HOST_INTERNAL=1 "$BIN_DIR/agent-box" is-sandbox-enabled "\$PWD" >/dev/null 2>&1; then
+  SANDBOX_ENABLED=0
+fi
 
 export AG_HOST_WORKDIR="\${PWD}"
 export AG_HARNESS_PID="\$\$"
 export SHELL="\$SHIM_DIR/zsh"
 export PATH="\$SHIM_DIR:\$PATH"
 
-SESSION_KEY="\${ORCA_AGENT_SESSION_ID:-ag-ppid-\$\$}"
-SAFE_KEY="\$(printf '%s' "\$SESSION_KEY" | tr -c 'a-zA-Z0-9_.-' '_')"
-UID_NUM="\$(id -u 2>/dev/null || echo 501)"
-SESSION_DIR="/tmp/orca-ag-openshell-\$UID_NUM/\$SAFE_KEY"
-AG_SANDBOX_HOST_INTERNAL=1 "$BIN_DIR/agent-box" agy-chat-daemon "\$SESSION_DIR" "\$PWD" "\$\$" >/dev/null 2>&1 &
+if [ "\$SANDBOX_ENABLED" = "1" ]; then
+  unset BAO_TOKEN BAO_ADDR BEADS_DOLT_PASSWORD DOLT_PASSWORD SOPS_AGE_KEY_FILE
+  unset SSH_AUTH_SOCK GITHUB_TOKEN GH_TOKEN OPENAI_API_KEY ANTHROPIC_API_KEY
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
+  SESSION_KEY="\${ORCA_AGENT_SESSION_ID:-ag-ppid-\$\$}"
+  SAFE_KEY="\$(printf '%s' "\$SESSION_KEY" | tr -c 'a-zA-Z0-9_.-' '_')"
+  UID_NUM="\$(id -u 2>/dev/null || echo 501)"
+  SESSION_DIR="/tmp/orca-ag-openshell-\$UID_NUM/\$SAFE_KEY"
+  AG_SANDBOX_HOST_INTERNAL=1 "$BIN_DIR/agent-box" agy-chat-daemon "\$SESSION_DIR" "\$PWD" "\$\$" >/dev/null 2>&1 &
+fi
 
 exec "\$REAL_BIN" "\$@"
 EOF

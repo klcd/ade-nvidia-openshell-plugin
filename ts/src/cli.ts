@@ -6,6 +6,7 @@ import { CodexAdapter } from './agents/codex.js';
 import { AntigravityAdapter } from './agents/antigravity.js';
 import { runSandboxSession } from './runner.js';
 import { runAgyChatDaemon, runAgyChatExec, runAgyPolicyAdd } from './agy-chat-sandbox.js';
+import { detectProjectRoot, isSandboxModeEnabled, USER_HOME } from './config.js';
 
 function getAdapter(target: string): AgentAdapter {
   switch (target.toLowerCase()) {
@@ -33,6 +34,11 @@ async function main(): Promise<void> {
 
   if (binaryName.includes('agent-box')) {
     agentTarget = process.argv[2] || '';
+    if (agentTarget === 'is-sandbox-enabled') {
+      const targetDir = process.argv[3] || process.cwd();
+      const projRoot = detectProjectRoot(targetDir);
+      process.exit(isSandboxModeEnabled(USER_HOME, projRoot) ? 0 : 1);
+    }
     if (agentTarget === 'agy-chat-daemon') {
       const sessionDir = process.argv[3] || '';
       const projectRoot = process.argv[4] || process.cwd();
