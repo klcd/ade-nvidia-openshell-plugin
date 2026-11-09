@@ -1,0 +1,64 @@
+<div class="container">
+  <div class="header">
+    <div class="header-top">
+      <div class="title">
+        <span>OpenShell Policies</span>
+        <span id="sandboxBadge" class="badge neutral">Loading...</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button
+          id="sandboxToggleBtn"
+          type="button"
+          role="switch"
+          aria-checked="true"
+          class="sandbox-toggle"
+          title="Activate or deactivate OpenShell sandboxing for agent launches and chat commands"
+        >
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          <span id="sandboxToggleLabel">Sandbox</span>
+        </button>
+        <button id="refreshBtn" title="Reload active project &amp; agent policies">Refresh</button>
+      </div>
+    </div>
+    <div id="bypassNotice" class="bypass-notice" style="display:none;">
+      <span class="access-dot l7" title="Host Mode"></span>
+      <span id="bypassNoticeText">Sandboxing deactivated for this worktree &mdash; new agent tabs &amp; chat commands run directly on host.</span>
+    </div>
+    <div id="contextBanner" class="grid-2" style="margin-top:2px;">
+      <div class="stat-box" id="projectStatBox" style="flex-direction:row;justify-content:space-between;align-items:center;padding:7px 10px;">
+        <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+          <span class="sub" style="font-size:10px;">Project</span>
+          <strong id="projectLabel" class="mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Detecting...</strong>
+        </div>
+        <span id="branchBadge" class="badge neutral">&mdash;</span>
+      </div>
+      <div class="stat-box" style="flex-direction:row;justify-content:space-between;align-items:center;padding:7px 10px;">
+        <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+          <span class="sub" style="font-size:10px;">Agent</span>
+          <strong id="agentLabel" class="mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Detecting...</strong>
+        </div>
+        <span id="agentStateBadge" class="badge allow">Active</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Interactive CLI Command Policy Tester -->
+  <div class="card" style="padding:8px 10px;gap:6px;">
+    <div class="card-title">
+      <span>Test CLI Command</span>
+    </div>
+    <div class="tester-box">
+      <input id="cmdInput" type="text" class="mono" placeholder="Enter command to test..." />
+      <button id="testBtn" class="primary">Check</button>
+    </div>
+    <div id="evalOutput" style="display:none;" class="eval-result"></div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="cli">CLI Commands (<span id="cliCount">0</span>)</button>
+    <button class="tab" data-tab="egress">Sandbox Egress (<span id="egressCount">0</span>)</button>
+    <button class="tab" data-tab="system">Sandbox System</button>
+  </div>
+
+  <div id="tabContent"></div>
+</div>

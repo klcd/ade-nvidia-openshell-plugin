@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${ORCA_OPENSHELL_BRIDGE_BIN_DIR:-$HOME/.local/bin}"
 POLICY_DIR="${ORCA_OPENSHELL_POLICY_DIR:-$HOME/.agents/orca-openshell-policies}"
 
+bun "$ROOT/scripts/build-orca-panel.ts"
 (cd "$ROOT/ts" && bun build src/cli.ts --outfile=dist/agent-box.bundle.js --target=node)
 (cd "$ROOT/ts" && bun build src/delegation-admin.ts --outfile=dist/orca-delegation.bundle.js --target=node)
 (cd "$ROOT/ts" && bun build src/setup-codex-provider.ts --outfile=dist/orca-codex-provider-setup.bundle.js --target=node)
