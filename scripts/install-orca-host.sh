@@ -128,10 +128,7 @@ if [ "\$SANDBOX_ENABLED" = "1" ]; then
   unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
   SESSION_KEY="\${ORCA_AGENT_SESSION_ID:-ag-ppid-\$\$}"
-  SAFE_KEY="\$(printf '%s' "\$SESSION_KEY" | tr -c 'a-zA-Z0-9_.-' '_')"
-  UID_NUM="\$(id -u 2>/dev/null || echo 501)"
-  SESSION_DIR="/tmp/orca-ag-openshell-\$UID_NUM/\$SAFE_KEY"
-  AG_SANDBOX_HOST_INTERNAL=1 "$BIN_DIR/agent-box" agy-chat-daemon "\$SESSION_DIR" "\$PWD" "\$\$" >/dev/null 2>&1 &
+  TMPDIR=/tmp AG_SANDBOX_HOST_INTERNAL=1 "$BIN_DIR/agent-box" agy-chat-daemon "\$SESSION_KEY" "\$PWD" "\$\$" >/dev/null 2>&1 &
 fi
 
 exec "\$REAL_BIN" "\$@"

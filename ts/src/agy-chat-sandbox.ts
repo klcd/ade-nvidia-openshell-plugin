@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +15,11 @@ import {
   USER_HOME,
 } from './config.js';
 import { discoverAndMergePolicies, mergePolicies, mergeTwoPolicies, parsePolicyFile } from './policy.js';
-import { OpenShellSandbox } from './sandbox.js';
+import {
+  ensureValidHostTmpDir,
+  OpenShellSandbox,
+  spawnSandboxLifecycleWatchdog,
+} from './sandbox.js';
 import { applyWorkspaceWriteScope, getExtraProviderNames, getWorkspaceWritePaths } from './sandbox-scope.js';
 
 export interface AgyChatSandboxState {
@@ -27,6 +32,7 @@ export interface AgyChatSandboxState {
   sshHost: string;
   harnessPid: number;
   daemonPid: number;
+  agentSessionId?: string;
   createdAt: string;
   ready: boolean;
   hibernated?: boolean;
@@ -376,12 +382,25 @@ function syncSandboxDeltaToHost(state: AgyChatSandboxState, sessionDir: string):
 }
 
 export async function runAgyChatDaemon(
-  sessionDir: string,
+  sessionDirOrKey: string,
   projectRoot: string,
   harnessPid: number
 ): Promise<number> {
   process.env.AG_SANDBOX_HOST_INTERNAL = '1';
   delete process.env.ANTIGRAVITY_HARNESS_PATH;
+  ensureValidHostTmpDir();
+
+  const rawSessionKey = path.isAbsolute(sessionDirOrKey)
+    ? ''
+    : sessionDirOrKey || process.env.ORCA_AGENT_SESSION_ID || `ag-ppid-${harnessPid}`;
+  const sessionDir = path.isAbsolute(sessionDirOrKey)
+    ? sessionDirOrKey
+    : getAgySessionDir(rawSessionKey);
+  const sessionBase = path.basename(sessionDir);
+  const resolvedAgentSessionId =
+    process.env.ORCA_AGENT_SESSION_ID ||
+    (rawSessionKey.startsWith('antigravity_') ? rawSessionKey : undefined) ||
+    (sessionBase.startsWith('antigravity_') ? sessionBase : undefined);
 
   fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(sessionDir, 'creating.lock');
@@ -506,20 +525,18 @@ export async function runAgyChatDaemon(
       sshHost,
       harnessPid,
       daemonPid: process.pid,
+      ...(resolvedAgentSessionId ? { agentSessionId: resolvedAgentSessionId } : {}),
       createdAt: new Date().toISOString(),
       ready: true,
       hibernated: false,
     };
 
     writeAtomicState(statePath, state);
-    const sessionBase = path.basename(sessionDir);
     registerSandboxSession({
       sandboxName,
       agent: 'antigravity',
       workspacePath: resolvedRoot,
-      agentSessionId:
-        process.env.ORCA_AGENT_SESSION_ID ||
-        (sessionBase.startsWith('antigravity_') ? sessionBase : undefined),
+      agentSessionId: resolvedAgentSessionId,
       pid: process.pid,
     });
   } catch (err) {
@@ -534,8 +551,10 @@ export async function runAgyChatDaemon(
     try { fs.rmSync(stageDir, { recursive: true, force: true }); } catch {}
   }
 
+  const watchdogPid = spawnSandboxLifecycleWatchdog(process.pid, sandboxName);
+
   let shuttingDown = false;
-  const cleanup = () => {
+  const cleanup = (alreadyDeleted = false) => {
     if (shuttingDown) return;
     shuttingDown = true;
     unregisterSandboxSession(sandboxName);
@@ -545,7 +564,7 @@ export async function runAgyChatDaemon(
         currentState = JSON.parse(fs.readFileSync(statePath, 'utf8')) as AgyChatSandboxState;
       }
     } catch {}
-    if (currentState && !currentState.hibernated) {
+    if (!alreadyDeleted && currentState && !currentState.hibernated) {
       try {
         syncSandboxDeltaToHost(currentState, sessionDir);
       } catch {}
@@ -557,7 +576,12 @@ export async function runAgyChatDaemon(
         );
       } catch {}
     }
-    sandbox?.delete();
+    if (!alreadyDeleted) {
+      sandbox?.delete();
+    }
+    if (watchdogPid) {
+      try { process.kill(watchdogPid, 'SIGTERM'); } catch {}
+    }
     try {
       const sessFile =
         process.env.ORCA_OPENSHELL_SESSION_EGRESS_FILE ||
@@ -579,6 +603,12 @@ export async function runAgyChatDaemon(
       process.exit(0);
     });
   }
+  process.once('exit', () => {
+    if (!shuttingDown) {
+      unregisterSandboxSession(sandboxName);
+      sandbox?.delete(true);
+    }
+  });
 
   const checkL7RequestQueue = () => {
     const reqDir = path.join(resolvedRoot, '.orca-openshell-l7-requests');
@@ -622,18 +652,13 @@ export async function runAgyChatDaemon(
   const hibernateLockPath = path.join(sessionDir, 'hibernating.lock');
   const wakeLockPath = path.join(sessionDir, 'waking.lock');
 
-  const sessionBaseForIdle = path.basename(sessionDir);
-  const resolvedAgentSessionId =
-    process.env.ORCA_AGENT_SESSION_ID ||
-    (sessionBaseForIdle.startsWith('antigravity_') ? sessionBaseForIdle : undefined);
-
-  const tryIdleHibernate = () => {
-    if (shuttingDown || !sandbox) return;
+  const tryIdleHibernate = (): 'ok' | 'deleted' => {
+    if (shuttingDown || !sandbox) return 'ok';
     const idleTimeoutSec = getSandboxIdleTimeoutSeconds(USER_HOME, {
       sandboxName,
       agentSessionId: resolvedAgentSessionId,
     });
-    if (idleTimeoutSec <= 0) return;
+    if (idleTimeoutSec <= 0) return 'ok';
 
     let currentState: AgyChatSandboxState | null = null;
     try {
@@ -641,22 +666,22 @@ export async function runAgyChatDaemon(
         currentState = JSON.parse(fs.readFileSync(statePath, 'utf8')) as AgyChatSandboxState;
       }
     } catch {}
-    if (!currentState || !currentState.ready || currentState.hibernated) return;
-    if (hasActiveAgyExecs(sessionDir)) return;
+    if (!currentState || !currentState.ready || currentState.hibernated) return 'ok';
+    if (hasActiveAgyExecs(sessionDir)) return 'ok';
     if (fs.existsSync(wakeLockPath)) {
       try {
         const wakePid = Number(fs.readFileSync(wakeLockPath, 'utf8').trim());
-        if (isPidAlive(wakePid)) return;
+        if (isPidAlive(wakePid)) return 'ok';
       } catch {}
     }
 
     const lastActivity = readLastAgyActivity(sessionDir);
-    if (!lastActivity || Date.now() - lastActivity < idleTimeoutSec * 1000) return;
+    if (!lastActivity || Date.now() - lastActivity < idleTimeoutSec * 1000) return 'ok';
 
     try {
       fs.writeFileSync(hibernateLockPath, String(process.pid), { mode: 0o600 });
       if (hasActiveAgyExecs(sessionDir) || Date.now() - readLastAgyActivity(sessionDir) < idleTimeoutSec * 1000) {
-        return;
+        return 'ok';
       }
       logDebug(`Idle timeout (${idleTimeoutSec}s) reached for Antigravity sandbox ${sandboxName}; stopping container`);
       try {
@@ -671,14 +696,26 @@ export async function runAgyChatDaemon(
       } catch {}
       if (sandbox.stop()) {
         writeAtomicState(statePath, { ...currentState, hibernated: true });
+      } else {
+        const phase = sandbox.getPhase();
+        if (phase === null) {
+          logDebug(`Sandbox ${sandboxName} was deleted externally; exiting Antigravity daemon`);
+          return 'deleted';
+        }
+        if (phase === 'Stopped') {
+          writeAtomicState(statePath, { ...currentState, hibernated: true });
+        }
       }
     } finally {
       try { fs.unlinkSync(hibernateLockPath); } catch {}
     }
+    return 'ok';
   };
 
   await new Promise<void>((resolve) => {
+    let ticks = 0;
     const timer = setInterval(() => {
+      ticks++;
       let hibernatedNow = false;
       try {
         if (fs.existsSync(statePath)) {
@@ -695,7 +732,19 @@ export async function runAgyChatDaemon(
         resolve();
         return;
       }
-      tryIdleHibernate();
+      if (tryIdleHibernate() === 'deleted') {
+        clearInterval(timer);
+        cleanup(true);
+        resolve();
+        return;
+      }
+      if (ticks % 10 === 0 && (!fs.existsSync(statePath) || sandbox?.getPhase() === null)) {
+        logDebug(`Sandbox ${sandboxName} or session state removed externally; exiting Antigravity daemon`);
+        clearInterval(timer);
+        cleanup(true);
+        resolve();
+        return;
+      }
     }, 1000);
   });
 
@@ -870,6 +919,7 @@ function ensureAgySandboxReady(
         env: {
           ...process.env,
           AG_SANDBOX_HOST_INTERNAL: '1',
+          TMPDIR: '/tmp',
         },
       }
     );
@@ -888,8 +938,14 @@ function ensureAgySandboxReady(
 
 export function getAgySessionDir(sessionKey: string): string {
   const safeSessionKey = sessionKey.replace(/[^a-zA-Z0-9_.-]/g, '_');
-  const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
-  return path.join('/tmp', `orca-ag-openshell-${uid}`, safeSessionKey);
+  const compactKey =
+    safeSessionKey.length > 24
+      ? `${safeSessionKey.slice(0, 11)}-${createHash('sha256').update(safeSessionKey).digest('hex').slice(0, 12)}`
+      : safeSessionKey;
+  const baseDir =
+    process.env.ORCA_AG_SESSIONS_DIR ||
+    path.join(USER_HOME, '.orca', 'ag');
+  return path.join(baseDir, compactKey);
 }
 
 export interface BlockedEgressInfo {
@@ -1105,6 +1161,7 @@ export async function runAgyChatExec(shellName: string, commandLine: string): Pr
     });
   }
 
+  ensureValidHostTmpDir();
   const releaseExecLock = acquireAgyExecLock(sessionDir);
   touchAgyActivity(sessionDir);
   try {
@@ -1223,6 +1280,7 @@ export async function runAgyChatExec(shellName: string, commandLine: string): Pr
 export async function runAgyPolicyAdd(rawArgs: string[]): Promise<number> {
   process.env.AG_SANDBOX_HOST_INTERNAL = '1';
   delete process.env.ANTIGRAVITY_HARNESS_PATH;
+  ensureValidHostTmpDir();
 
   let scope: 'session' | 'workspace' | 'global' = 'session';
   let host = '';

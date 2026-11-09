@@ -1535,31 +1535,42 @@ function readSandboxRegistryMap(homeDir = os.homedir()): Map<string, SandboxRegi
 
   if (!process.env.ORCA_OPENSHELL_REGISTRY_FILE) {
     try {
+      const agSessionsRoot = process.env.ORCA_AG_SESSIONS_DIR || path.join(homeDir, '.orca', 'ag')
+      const agBases: string[] = []
+      if (fs.existsSync(agSessionsRoot)) {
+        agBases.push(agSessionsRoot)
+      }
       for (const rootDir of ['/tmp', '/private/tmp']) {
         if (!fs.existsSync(rootDir)) continue
         for (const agBase of fs.readdirSync(rootDir)) {
-          if (!agBase.startsWith('orca-ag-openshell-')) continue
-          const fullBase = path.join(rootDir, agBase)
-          for (const sessKey of fs.readdirSync(fullBase)) {
-            const stateFile = path.join(fullBase, sessKey, 'state.json')
-            if (!fs.existsSync(stateFile)) continue
-            try {
-              const st = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
-                sandboxName?: string
-                projectRoot?: string
-                daemonPid?: number
-              }
-              if (st?.sandboxName && !map.has(st.sandboxName) && isHostPidAlive(st.daemonPid)) {
-                map.set(st.sandboxName, {
-                  sandboxName: st.sandboxName,
-                  agent: 'antigravity',
-                  workspacePath: st.projectRoot || '',
-                  ...(sessKey.startsWith('antigravity_') ? { agentSessionId: sessKey } : {}),
-                  pid: st.daemonPid,
-                })
-              }
-            } catch {}
+          if (agBase.startsWith('orca-ag-openshell-')) {
+            agBases.push(path.join(rootDir, agBase))
           }
+        }
+      }
+      for (const fullBase of agBases) {
+        for (const sessKey of fs.readdirSync(fullBase)) {
+          const stateFile = path.join(fullBase, sessKey, 'state.json')
+          if (!fs.existsSync(stateFile)) continue
+          try {
+            const st = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
+              sandboxName?: string
+              projectRoot?: string
+              daemonPid?: number
+              agentSessionId?: string
+            }
+            if (st?.sandboxName && !map.has(st.sandboxName) && isHostPidAlive(st.daemonPid)) {
+              const resolvedSessId =
+                st.agentSessionId || (sessKey.startsWith('antigravity_') ? sessKey : undefined)
+              map.set(st.sandboxName, {
+                sandboxName: st.sandboxName,
+                agent: 'antigravity',
+                workspacePath: st.projectRoot || '',
+                ...(resolvedSessId ? { agentSessionId: resolvedSessId } : {}),
+                pid: st.daemonPid,
+              })
+            }
+          } catch {}
         }
       }
     } catch {}

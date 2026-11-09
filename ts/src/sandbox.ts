@@ -5,8 +5,61 @@ import { execFileSync, spawn } from 'node:child_process';
 import type { OpenShellPolicy } from './types.js';
 import { logDebug } from './config.js';
 
+export function ensureValidHostTmpDir(): void {
+  const cur = process.env.TMPDIR;
+  if (cur && (cur.includes('/oacp-') || !fs.existsSync(cur))) {
+    process.env.TMPDIR = '/tmp';
+  }
+}
+
+export function spawnSandboxLifecycleWatchdog(
+  watchedPid: number,
+  sandboxName: string
+): number | undefined {
+  try {
+    const watchdog = spawn(
+      process.execPath,
+      [
+        '-e',
+        `const { execFileSync } = require('node:child_process');
+         const ppid = Number(process.argv[1]);
+         const name = process.argv[2];
+         let deleting = false;
+         const timer = setInterval(() => {
+           if (deleting) return;
+           try { process.kill(ppid, 0); } catch {
+             deleting = true;
+             clearInterval(timer);
+             let attempts = 0;
+             const tryDelete = () => {
+               attempts++;
+               try {
+                 execFileSync('openshell', ['sandbox', 'delete', name], { stdio: 'ignore', timeout: 15000 });
+                 process.exit(0);
+               } catch {
+                 if (attempts >= 3) process.exit(0);
+                 setTimeout(tryDelete, 1500);
+               }
+             };
+             tryDelete();
+           }
+         }, 1000);`,
+        String(watchedPid),
+        sandboxName,
+      ],
+      { detached: true, stdio: 'ignore', env: { ...process.env, TMPDIR: '/tmp' } }
+    );
+    watchdog.unref();
+    return watchdog.pid;
+  } catch {
+    return undefined;
+  }
+}
+
 export class OpenShellSandbox {
-  constructor(public readonly name: string) {}
+  constructor(public readonly name: string) {
+    ensureValidHostTmpDir();
+  }
 
   public static create(
     name: string,
@@ -15,6 +68,7 @@ export class OpenShellSandbox {
     policy: OpenShellPolicy | null,
     uploads: Array<{ source: string; destination: string }> = []
   ): OpenShellSandbox {
+    ensureValidHostTmpDir();
     OpenShellSandbox.checkPolicyBoundary(name, policy);
     const cmdArgs = [
       'sandbox', 'create',
@@ -174,24 +228,73 @@ export class OpenShellSandbox {
     }
   }
 
-  public delete(detached = false): void {
+  private spawnDetachedDeleteRetry(): void {
     try {
-      if (detached) {
-        const child = spawn('openshell', ['sandbox', 'delete', this.name], {
+      const child = spawn(
+        process.execPath,
+        [
+          '-e',
+          `const { execFileSync } = require('node:child_process');
+           const name = process.argv[1];
+           let attempts = 0;
+           const tryDelete = () => {
+             attempts++;
+             try {
+               execFileSync('openshell', ['sandbox', 'delete', name], { stdio: 'ignore', timeout: 15000 });
+               process.exit(0);
+             } catch {
+               if (attempts >= 3) process.exit(0);
+               setTimeout(tryDelete, 1500);
+             }
+           };
+           tryDelete();`,
+          this.name,
+        ],
+        {
           detached: true,
           stdio: 'ignore',
-        });
-        child.unref();
-        logDebug(`Scheduled detached deletion for sandbox ${this.name}`);
-      } else {
-        execFileSync('openshell', ['sandbox', 'delete', this.name], {
-          stdio: ['ignore', 'ignore', 'ignore'],
-          timeout: 15000,
-        });
-        logDebug(`Deleted sandbox ${this.name}`);
-      }
+          env: { ...process.env, TMPDIR: '/tmp' },
+        }
+      );
+      child.unref();
+      logDebug(`Scheduled detached deletion for sandbox ${this.name}`);
     } catch (err) {
-      logDebug(`Failed to delete sandbox ${this.name}: ${err}`);
+      logDebug(`Failed to schedule detached deletion for sandbox ${this.name}: ${err}`);
+    }
+  }
+
+  public delete(detached = false): void {
+    ensureValidHostTmpDir();
+    if (detached) {
+      this.spawnDetachedDeleteRetry();
+      return;
+    }
+
+    try {
+      execFileSync('openshell', ['sandbox', 'delete', this.name], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        timeout: 15000,
+      });
+      logDebug(`Deleted sandbox ${this.name}`);
+      return;
+    } catch (err) {
+      logDebug(`First delete attempt failed for sandbox ${this.name}: ${err}`);
+    }
+
+    if (this.getPhase() === null) {
+      return;
+    }
+
+    try {
+      execFileSync('sleep', ['0.5']);
+      execFileSync('openshell', ['sandbox', 'delete', this.name], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        timeout: 15000,
+      });
+      logDebug(`Deleted sandbox ${this.name} on retry`);
+    } catch (retryErr) {
+      logDebug(`Retry delete failed for sandbox ${this.name}, scheduling detached cleanup: ${retryErr}`);
+      this.spawnDetachedDeleteRetry();
     }
   }
 

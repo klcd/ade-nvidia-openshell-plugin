@@ -14,7 +14,7 @@ import {
   unregisterSandboxSession,
 } from './config.js';
 import { discoverAndMergePolicies, mergePolicies, mergeTwoPolicies, parsePolicyFile } from './policy.js';
-import { OpenShellSandbox } from './sandbox.js';
+import { OpenShellSandbox, spawnSandboxLifecycleWatchdog } from './sandbox.js';
 import { assertNoCredentialLeak, redactCredentialFiles } from './credential-security.js';
 import { isTurnCompleteFrame, rewriteJsonRpcPaths } from './protocols/jsonrpc.js';
 import { StreamSessionTracker } from './protocols/session-hibernation.js';
@@ -253,30 +253,7 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   // Spawn a lightweight parent-PID watchdog so that even if Orca's teardown
   // supervisor sends SIGKILL to this bridge process, the OpenShell sandbox is
   // guaranteed to be deleted once this process exits.
-  let watchdogPid: number | undefined;
-  try {
-    const watchdog = spawn(
-      process.execPath,
-      [
-        '-e',
-        `const { execFileSync } = require('node:child_process');
-         const ppid = Number(process.argv[1]);
-         const name = process.argv[2];
-         const timer = setInterval(() => {
-           try { process.kill(ppid, 0); } catch {
-             clearInterval(timer);
-             try { execFileSync('openshell', ['sandbox', 'delete', name], { stdio: 'ignore', timeout: 15000 }); } catch {}
-             process.exit(0);
-           }
-         }, 1000);`,
-        String(process.pid),
-        sandboxName,
-      ],
-      { detached: true, stdio: 'ignore' }
-    );
-    watchdogPid = watchdog.pid;
-    watchdog.unref();
-  } catch {}
+  const watchdogPid = spawnSandboxLifecycleWatchdog(process.pid, sandboxName);
 
   const syncSandboxToHost = async (): Promise<void> => {
     if (syncing) return;

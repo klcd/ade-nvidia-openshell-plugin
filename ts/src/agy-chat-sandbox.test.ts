@@ -13,6 +13,7 @@ import {
   translateAgyCommandAndCwd,
 } from './agy-chat-sandbox.js';
 import { getSandboxIdleTimeoutSeconds, unregisterSandboxSession } from './config.js';
+import { ensureValidHostTmpDir } from './sandbox.js';
 
 describe('Antigravity Chat Mode OpenShell Sandbox Helpers', () => {
   test('activity timestamps and active-exec locks guard idle hibernation', () => {
@@ -66,10 +67,16 @@ describe('Antigravity Chat Mode OpenShell Sandbox Helpers', () => {
     expect(res.translatedCommand).toBe('whoami');
   });
 
-  test('getAgySessionDir sanitizes session keys into deterministic /tmp directory', () => {
-    const dir = getAgySessionDir('antigravity_b153a235_11ff_438c');
-    expect(dir).toContain('/tmp/orca-ag-openshell-');
-    expect(dir.endsWith('/antigravity_b153a235_11ff_438c')).toBe(true);
+  test('getAgySessionDir stores session state in ~/.orca/ag and keeps ctl.sock under macOS 104-byte limit', () => {
+    const longSessionKey = 'antigravity_311ee386_d918_4962_8130_9d0a9cd251ce_extra_suffix';
+    const dir = getAgySessionDir(longSessionKey);
+    expect(dir).toContain(path.join('.orca', 'ag'));
+    expect(dir).not.toContain('/tmp/');
+    expect(path.basename(dir).length).toBeLessThanOrEqual(24);
+    expect(path.join(dir, 'ctl.sock').length).toBeLessThan(104);
+
+    const shortDir = getAgySessionDir('ag-ppid-12345');
+    expect(shortDir.endsWith(path.join('.orca', 'ag', 'ag-ppid-12345'))).toBe(true);
   });
 
   test('resolveAgyProjectRoot honours AG_HOST_WORKDIR when set', () => {
@@ -160,6 +167,22 @@ describe('Antigravity Chat Mode OpenShell Sandbox Helpers', () => {
       if (prevMode === undefined) delete process.env.ORCA_OPENSHELL_MODE_FILE;
       else process.env.ORCA_OPENSHELL_MODE_FILE = prevMode;
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('ensureValidHostTmpDir resets ephemeral oacp and missing TMPDIR values to /tmp', () => {
+    const prevTmp = process.env.TMPDIR;
+    try {
+      process.env.TMPDIR = '/tmp/oacp-501/045d92ce/run-ephemeral';
+      ensureValidHostTmpDir();
+      expect(process.env.TMPDIR).toBe('/tmp');
+
+      process.env.TMPDIR = '/tmp/nonexistent-orca-test-dir-999999';
+      ensureValidHostTmpDir();
+      expect(process.env.TMPDIR).toBe('/tmp');
+    } finally {
+      if (prevTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = prevTmp;
     }
   });
 });
