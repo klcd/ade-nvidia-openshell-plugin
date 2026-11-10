@@ -31,9 +31,9 @@
     "statusBarItems": [
       {
         "id": "openshell-status",
-        "text": "OpenShell: Enforced",
+        "text": "OpenShell: Off (Host Mode)",
         "icon": "layers",
-        "tone": "success",
+        "tone": "warning",
         "tooltip": "OpenShell Sandbox & CLI Command Policies (click to inspect)",
         "command": "openshell.inspectPolicies"
       }

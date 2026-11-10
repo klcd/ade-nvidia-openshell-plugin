@@ -131,6 +131,7 @@ export interface SandboxModeState {
 export interface PolicyInspectionReport {
   generatedAt: string
   sandboxEnabled: boolean
+  defaultSandboxEnabled: boolean
   sandboxInheritedFrom: string | null
   sandboxIdleTimeoutSeconds: number
   selectedWorkspace: WorkspaceEntry
@@ -167,6 +168,7 @@ export interface OrcaWorktreePsEntry {
 
 export interface SandboxModeFileData {
   enabled?: boolean
+  defaultEnabled?: boolean
   updatedAt?: string
   idleTimeoutSeconds?: number
   tabIdleTimeouts?: Record<string, { seconds: number; updatedAt: string }>
@@ -277,6 +279,19 @@ export interface ParsedOpenShellPolicy {
   readOnly: string[]
   readWrite: string[]
   endpoints: NetworkEndpointRule[]
+}
+
+export interface SandboxDoctorCheck {
+  id: string
+  label: string
+  status: 'pass' | 'warn' | 'fail'
+  detail: string
+}
+
+export interface SandboxDoctorReport {
+  ok: boolean
+  checkedAt: string
+  checks: SandboxDoctorCheck[]
 }
 
 export function normalizeAgentId(raw?: string | null): 'claude' | 'codex' | 'antigravity' | null {

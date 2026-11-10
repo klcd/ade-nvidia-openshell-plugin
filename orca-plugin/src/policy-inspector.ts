@@ -1,4 +1,5 @@
 export * from './types.ts'
+export * from './state/file-lock.ts'
 export * from './state/worktree-paths.ts'
 export * from './state/sandbox-registry.ts'
 export * from './state/sandbox-mode.ts'

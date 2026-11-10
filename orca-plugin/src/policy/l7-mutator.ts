@@ -8,7 +8,12 @@ import {
   type AddL7PolicyResult,
 } from '../types.ts'
 import { discoverCurrentOrcaContext, resolveCurrentTabSandbox } from '../context/orca-context.ts'
-import { listActiveSandboxes } from '../sandbox/sandbox-control.ts'
+import {
+  getAugmentedEnv,
+  listActiveSandboxes,
+  resolveOpenShellBinary,
+} from '../sandbox/sandbox-control.ts'
+import { readJsonSafe, withStateLock, writeJsonAtomic } from '../state/file-lock.ts'
 import { recordSessionEgressRule, removeSessionEgressRule } from '../state/session-egress.ts'
 
 export const DEFAULT_L7_WILDCARD_BINARIES = [
@@ -31,71 +36,66 @@ export function persistL7PolicyToJsonFile(params: {
   triggerCommand?: string
 }): void {
   const { targetFile, ruleName, host, port, action, method, urlPath, effectiveBinaries, triggerCommand } = params
-  fs.mkdirSync(path.dirname(targetFile), { recursive: true })
+  withStateLock(targetFile, () => {
+    const doc = readJsonSafe<Record<string, any>>(targetFile, {
+      version: 1,
+      network_policies: {},
+    })
+    doc.version ??= 1
+    doc.network_policies ??= {}
 
-  let doc: Record<string, any> = {
-    version: 1,
-    network_policies: {},
-  }
-  if (fs.existsSync(targetFile)) {
-    try {
-      doc = JSON.parse(fs.readFileSync(targetFile, 'utf8'))
-    } catch {}
-  }
-  doc.version ??= 1
-  doc.network_policies ??= {}
-
-  const existingPol = doc.network_policies[ruleName] || {
-    name: ruleName,
-    binaries: effectiveBinaries.map(p => ({ path: p })),
-    endpoints: [],
-  }
-  const bins: Array<{ path: string }> = Array.isArray(existingPol.binaries) ? existingPol.binaries : []
-  for (const b of effectiveBinaries) {
-    if (!bins.some(item => item?.path === b)) {
-      bins.push({ path: b })
+    const existingPol = doc.network_policies[ruleName] || {
+      name: ruleName,
+      binaries: effectiveBinaries.map(p => ({ path: p })),
+      endpoints: [],
     }
-  }
-  existingPol.binaries = bins
-
-  const endpoints: any[] = Array.isArray(existingPol.endpoints) ? existingPol.endpoints : []
-  let ep = endpoints.find(e => e?.host === host && Number(e?.port || 443) === port)
-  if (!ep) {
-    ep = {
-      host,
-      port,
-      protocol: 'rest',
-      enforcement: 'enforce',
+    const bins: Array<{ path: string }> = Array.isArray(existingPol.binaries) ? existingPol.binaries : []
+    for (const b of effectiveBinaries) {
+      if (!bins.some(item => item?.path === b)) {
+        bins.push({ path: b })
+      }
     }
-    endpoints.push(ep)
-  }
-  if (triggerCommand && triggerCommand.trim()) {
-    ep.trigger_command = triggerCommand.trim()
-  }
-  // OpenShell L7 rules cannot be combined with access presets on the same endpoint
-  delete ep.access
+    existingPol.binaries = bins
 
-  if (action === 'allow') {
-    ep.rules = Array.isArray(ep.rules) ? ep.rules : []
-    const exists = ep.rules.some(
-      (r: any) => r?.allow?.method === method && r?.allow?.path === urlPath
-    )
-    if (!exists) {
-      ep.rules.push({ allow: { method, path: urlPath } })
+    const endpoints: any[] = Array.isArray(existingPol.endpoints) ? existingPol.endpoints : []
+    let ep = endpoints.find(e => e?.host === host && Number(e?.port || 443) === port)
+    if (!ep) {
+      ep = {
+        host,
+        port,
+        protocol: 'rest',
+        enforcement: 'enforce',
+      }
+      endpoints.push(ep)
     }
-  } else {
-    ep.deny_rules = Array.isArray(ep.deny_rules) ? ep.deny_rules : []
-    const exists = ep.deny_rules.some(
-      (d: any) => d?.method === method && d?.path === urlPath
-    )
-    if (!exists) {
-      ep.deny_rules.push({ method, path: urlPath })
+    if (triggerCommand && triggerCommand.trim()) {
+      ep.trigger_command = triggerCommand.trim()
     }
-  }
+    // OpenShell L7 rules cannot be combined with access presets on the same endpoint
+    delete ep.access
 
-  existingPol.endpoints = endpoints
-  doc.network_policies[ruleName] = existingPol
-  fs.writeFileSync(targetFile, JSON.stringify(doc, null, 2) + '\n', 'utf8')
+    if (action === 'allow') {
+      ep.rules = Array.isArray(ep.rules) ? ep.rules : []
+      const exists = ep.rules.some(
+        (r: any) => r?.allow?.method === method && r?.allow?.path === urlPath
+      )
+      if (!exists) {
+        ep.rules.push({ allow: { method, path: urlPath } })
+      }
+    } else {
+      ep.deny_rules = Array.isArray(ep.deny_rules) ? ep.deny_rules : []
+      const exists = ep.deny_rules.some(
+        (d: any) => d?.method === method && d?.path === urlPath
+      )
+      if (!exists) {
+        ep.deny_rules.push({ method, path: urlPath })
+      }
+    }
+
+    existingPol.endpoints = endpoints
+    doc.network_policies[ruleName] = existingPol
+    writeJsonAtomic(targetFile, doc)
+  })
 }
 
 /**
@@ -196,6 +196,8 @@ export function addL7Policy(
 
   const binFlags = effectiveBinaries.flatMap(b => ['--binary', b])
   const liveErrors: string[] = []
+  const openshellBin = resolveOpenShellBinary(homeDir)
+  const env = getAugmentedEnv(homeDir)
   for (const sbName of targetSandboxes) {
     const step1Args = [
       'policy',
@@ -221,15 +223,17 @@ export function addL7Policy(
     cliCommandsRun.push(`openshell ${step2Args.join(' ')}`)
 
     try {
-      execFileSync('openshell', step1Args, {
+      execFileSync(openshellBin, step1Args, {
         encoding: 'utf8',
         timeout: 8000,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env,
       })
-      execFileSync('openshell', step2Args, {
+      execFileSync(openshellBin, step2Args, {
         encoding: 'utf8',
         timeout: 8000,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env,
       })
       appliedSandboxes.push(sbName)
     } catch (err: any) {

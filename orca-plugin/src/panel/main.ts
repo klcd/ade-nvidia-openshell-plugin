@@ -230,6 +230,7 @@ async function loadReport(): Promise<void> {
     const changedContext =
       !prev ||
       prev.sandboxEnabled !== res.sandboxEnabled ||
+      prev.defaultSandboxEnabled !== res.defaultSandboxEnabled ||
       prev.sandboxIdleTimeoutSeconds !== res.sandboxIdleTimeoutSeconds ||
       prev.selectedWorkspace.path !== res.selectedWorkspace.path ||
       prev.currentAgent !== res.currentAgent ||
@@ -292,6 +293,31 @@ function renderActiveTab(): void {
   else if (panelState.activeTab === 'egress') container.innerHTML = renderEgressTab()
   else container.innerHTML = renderSystemTab()
 
+  const defaultSandboxModeSelect = document.getElementById(
+    'defaultSandboxModeSelect'
+  ) as HTMLSelectElement | null
+  if (defaultSandboxModeSelect) {
+    defaultSandboxModeSelect.addEventListener('change', async e => {
+      const enabled = (e.target as HTMLSelectElement).value === 'on'
+      defaultSandboxModeSelect.disabled = true
+      try {
+        const report = panelState.currentReport
+        const res = (await window.orca.plugin.request('setDefaultSandboxMode', {
+          enabled,
+          workspacePath: report?.selectedWorkspace?.path,
+          agent: report?.currentAgent,
+        })) as PolicyInspectionReport | null
+        if (res) {
+          panelState.currentReport = res
+          renderHeader()
+          renderActiveTab()
+        }
+      } catch {} finally {
+        defaultSandboxModeSelect.disabled = false
+      }
+    })
+  }
+
   const idleTimeoutSelect = document.getElementById('idleTimeoutSelect') as HTMLSelectElement | null
   if (idleTimeoutSelect) {
     idleTimeoutSelect.addEventListener('change', async e => {
@@ -313,6 +339,32 @@ function renderActiveTab(): void {
         }
       } catch {} finally {
         idleTimeoutSelect.disabled = false
+      }
+    })
+  }
+
+  const runDoctorBtn = document.getElementById('runDoctorBtn') as HTMLButtonElement | null
+  if (runDoctorBtn) {
+    runDoctorBtn.addEventListener('click', async () => {
+      if (panelState.runningDoctor) return
+      panelState.runningDoctor = true
+      renderActiveTab()
+      try {
+        const report = panelState.currentReport
+        const res = (await window.orca.plugin.request('runDoctor', {
+          workspacePath: report?.selectedWorkspace?.path,
+          agent: report?.currentAgent,
+        })) as { doctor?: any; report?: PolicyInspectionReport } | null
+        if (res?.doctor) {
+          panelState.doctorReport = res.doctor
+        }
+        if (res?.report) {
+          panelState.currentReport = res.report
+          renderHeader()
+        }
+      } catch {} finally {
+        panelState.runningDoctor = false
+        renderActiveTab()
       }
     })
   }

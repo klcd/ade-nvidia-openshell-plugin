@@ -1,9 +1,15 @@
-import type { L7PolicySuggestion, PolicyInspectionReport } from '../types.ts'
+import type {
+  L7PolicySuggestion,
+  PolicyInspectionReport,
+  SandboxDoctorReport,
+} from '../types.ts'
 
 export type PanelTab = 'cli' | 'egress' | 'system'
 
 export const panelState = {
   currentReport: null as PolicyInspectionReport | null,
+  doctorReport: null as SandboxDoctorReport | null,
+  runningDoctor: false,
   activeTab: 'cli' as PanelTab,
   searchFilter: '',
   actionFilter: 'all',

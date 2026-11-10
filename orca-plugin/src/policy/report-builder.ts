@@ -23,7 +23,11 @@ import {
 } from '../parsers/openshell-policy.ts'
 import { inspectNativeSync, loadPermissionGroups } from '../parsers/permission-yaml.ts'
 import { listActiveSandboxes, refreshActiveSandboxesCache } from '../sandbox/sandbox-control.ts'
-import { getSandboxIdleTimeoutSeconds, getSandboxMode } from '../state/sandbox-mode.ts'
+import {
+  getDefaultSandboxEnabled,
+  getSandboxIdleTimeoutSeconds,
+  getSandboxMode,
+} from '../state/sandbox-mode.ts'
 import { readSessionEgressEntries, writeSessionEgressEntries } from '../state/session-egress.ts'
 import { addL7Policy, DEFAULT_L7_WILDCARD_BINARIES } from './l7-mutator.ts'
 
@@ -533,10 +537,12 @@ export function buildPolicyReport(options?: {
     { workspacePath: selectedWorkspace.path, workspaceId: selectedWorkspace.id },
     homeDir
   )
+  const defaultSandboxEnabled = getDefaultSandboxEnabled(homeDir)
 
   return {
     generatedAt: new Date().toISOString(),
     sandboxEnabled: sandboxMode.enabled,
+    defaultSandboxEnabled,
     sandboxInheritedFrom: sandboxMode.inheritedFrom,
     sandboxIdleTimeoutSeconds,
     selectedWorkspace,

@@ -112,10 +112,13 @@ async function queryOrcaWorktreePsViaSocket(
   })
 }
 
-export async function refreshOrcaContextCache(homeDir = os.homedir()): Promise<void> {
+export async function refreshOrcaContextCache(
+  homeDir = os.homedir(),
+  force = false
+): Promise<void> {
   const now = Date.now()
   if (orcaRefreshInFlight) return orcaRefreshInFlight
-  if (now - lastOrcaRefreshAt < 1500 && getCachedOrcaWorktrees().length > 0) return
+  if (!force && now - lastOrcaRefreshAt < 1500 && getCachedOrcaWorktrees().length > 0) return
 
   orcaRefreshInFlight = (async () => {
     try {

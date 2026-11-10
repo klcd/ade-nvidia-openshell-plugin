@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { inferSandboxAgent, type SandboxRegistryEntry } from '../types.ts'
+import { readJsonSafe, withStateLock, writeJsonAtomic } from './file-lock.ts'
 import { extractPathFromWorkspaceId, normalizeWorktreePath } from './worktree-paths.ts'
 
 export function getSandboxRegistryFilePath(homeDir = os.homedir()): string {
@@ -31,44 +32,34 @@ export function registerSandboxRegistryEntry(
 ): void {
   const regPath = getSandboxRegistryFilePath(homeDir)
   try {
-    fs.mkdirSync(path.dirname(regPath), { recursive: true })
-    let existing: SandboxRegistryEntry[] = []
-    if (fs.existsSync(regPath)) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(regPath, 'utf8')) as {
-          entries?: SandboxRegistryEntry[]
-        }
-        if (Array.isArray(parsed?.entries)) {
-          existing = parsed.entries
-        }
-      } catch {}
-    }
+    withStateLock(regPath, () => {
+      const parsed = readJsonSafe<{ entries?: SandboxRegistryEntry[] }>(regPath, {})
+      const existing = Array.isArray(parsed?.entries) ? parsed.entries : []
 
-    const now = new Date().toISOString()
-    const normalizedPath = normalizeWorktreePath(entry.workspacePath)
-    const alive = existing.filter(
-      e =>
-        e &&
-        typeof e.sandboxName === 'string' &&
-        e.sandboxName !== entry.sandboxName &&
-        isHostPidAlive(e.pid)
-    )
-    const prev = existing.find(e => e?.sandboxName === entry.sandboxName)
-    alive.push({
-      sandboxName: entry.sandboxName,
-      agent: entry.agent,
-      workspacePath: normalizedPath,
-      ...(entry.workspaceId ? { workspaceId: entry.workspaceId } : {}),
-      ...(entry.terminalId ? { terminalId: entry.terminalId } : {}),
-      ...(entry.agentSessionId ? { agentSessionId: entry.agentSessionId } : {}),
-      ...(entry.pid ? { pid: entry.pid } : {}),
-      createdAt: entry.createdAt || prev?.createdAt || now,
-      updatedAt: entry.updatedAt || now,
+      const now = new Date().toISOString()
+      const normalizedPath = normalizeWorktreePath(entry.workspacePath)
+      const alive = existing.filter(
+        e =>
+          e &&
+          typeof e.sandboxName === 'string' &&
+          e.sandboxName !== entry.sandboxName &&
+          isHostPidAlive(e.pid)
+      )
+      const prev = existing.find(e => e?.sandboxName === entry.sandboxName)
+      alive.push({
+        sandboxName: entry.sandboxName,
+        agent: entry.agent,
+        workspacePath: normalizedPath,
+        ...(entry.workspaceId ? { workspaceId: entry.workspaceId } : {}),
+        ...(entry.terminalId ? { terminalId: entry.terminalId } : {}),
+        ...(entry.agentSessionId ? { agentSessionId: entry.agentSessionId } : {}),
+        ...(entry.pid ? { pid: entry.pid } : {}),
+        createdAt: entry.createdAt || prev?.createdAt || now,
+        updatedAt: entry.updatedAt || now,
+      })
+
+      writeJsonAtomic(regPath, { entries: alive })
     })
-
-    const tmpPath = `${regPath}.${process.pid}.tmp`
-    fs.writeFileSync(tmpPath, JSON.stringify({ entries: alive }, null, 2) + '\n', 'utf8')
-    fs.renameSync(tmpPath, regPath)
   } catch {}
 }
 
@@ -77,14 +68,14 @@ export function removeSandboxRegistryEntryOnly(sandboxName: string, homeDir = os
   const regPath = getSandboxRegistryFilePath(homeDir)
   try {
     if (!fs.existsSync(regPath)) return
-    const parsed = JSON.parse(fs.readFileSync(regPath, 'utf8')) as { entries?: SandboxRegistryEntry[] }
-    if (!Array.isArray(parsed?.entries)) return
-    const filtered = parsed.entries.filter(e => e?.sandboxName && e.sandboxName !== sandboxName)
-    if (filtered.length !== parsed.entries.length) {
-      const tmpPath = `${regPath}.${process.pid}.tmp`
-      fs.writeFileSync(tmpPath, JSON.stringify({ entries: filtered }, null, 2) + '\n', 'utf8')
-      fs.renameSync(tmpPath, regPath)
-    }
+    withStateLock(regPath, () => {
+      const parsed = readJsonSafe<{ entries?: SandboxRegistryEntry[] }>(regPath, {})
+      if (!Array.isArray(parsed?.entries)) return
+      const filtered = parsed.entries.filter(e => e?.sandboxName && e.sandboxName !== sandboxName)
+      if (filtered.length !== parsed.entries.length) {
+        writeJsonAtomic(regPath, { entries: filtered })
+      }
+    })
   } catch {}
 }
 
@@ -93,7 +84,7 @@ export function readSandboxRegistryMap(homeDir = os.homedir()): Map<string, Sand
   const regPath = getSandboxRegistryFilePath(homeDir)
   try {
     if (fs.existsSync(regPath)) {
-      const parsed = JSON.parse(fs.readFileSync(regPath, 'utf8')) as { entries?: SandboxRegistryEntry[] }
+      const parsed = readJsonSafe<{ entries?: SandboxRegistryEntry[] }>(regPath, {})
       for (const entry of parsed?.entries ?? []) {
         if (entry?.sandboxName && isHostPidAlive(entry.pid)) {
           map.set(entry.sandboxName, entry)

@@ -14,10 +14,13 @@ import {
   listActiveSandboxes,
   pauseActiveSandbox,
   type PolicyInspectionReport,
+  refreshOrcaContextCache,
   removeTemporaryL7Rule,
   resolveCurrentTabSandbox,
   resolveWorkspacePathById,
   resumeActiveSandbox,
+  runSandboxDoctor,
+  setDefaultSandboxEnabled,
   setSandboxIdleTimeoutSeconds,
   setSandboxMode,
   stopActiveSandbox,
@@ -222,6 +225,22 @@ export default function activate(orca: OrcaWorkerApi): void {
     return toStrictJson(report)
   })
 
+  orca.panels?.handle('setDefaultSandboxMode', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      enabled?: boolean
+      workspacePath?: string
+      agent?: string
+    }
+    setDefaultSandboxEnabled(Boolean(req.enabled))
+    const report = await buildPolicyReportAsync({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    return toStrictJson(report)
+  })
+
   orca.panels?.handle('setSandboxIdleTimeout', async (input) => {
     const req = (input && typeof input === 'object' ? input : {}) as {
       seconds?: number
@@ -357,10 +376,31 @@ export default function activate(orca: OrcaWorkerApi): void {
     return toStrictJson({ ...res, report })
   })
 
+  orca.panels?.handle('runDoctor', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      workspacePath?: string
+      agent?: string
+    }
+    const doctor = await runSandboxDoctor()
+    const report = await buildPolicyReportAsync({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    return toStrictJson({ doctor, report })
+  })
+
   orca.commands?.register('openshell.inspectPolicies', async () => {
     await buildPolicyReportAsync({ fallbackAgent: lastAgent })
     refreshStatusBar()
     return formatCliPolicySummary()
+  })
+
+  ;(orca as any).events?.on?.('workspace.changed', () => {
+    void refreshOrcaContextCache(undefined, true).then(() => {
+      refreshStatusBar()
+    })
   })
 
   refreshStatusBar()

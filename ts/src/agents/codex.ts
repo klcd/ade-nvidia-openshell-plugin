@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { AgentAdapter, AgentType } from '../types.js';
-import { USER_HOME } from '../config.js';
+import { USER_HOME, buildStagedGitConfig } from '../config.js';
 import { syncWorkspaceBack } from '../sandbox.js';
 
 export class CodexAdapter implements AgentAdapter {
@@ -68,7 +68,7 @@ export class CodexAdapter implements AgentAdapter {
     }
   }
 
-  public async stageConfiguration(stageDir: string, _projectRoot: string, _projectName: string): Promise<void> {
+  public async stageConfiguration(stageDir: string, projectRoot: string, _projectName: string): Promise<void> {
     const codexDir = path.join(stageDir, '.codex');
     fs.mkdirSync(codexDir, { recursive: true });
 
@@ -84,7 +84,7 @@ export class CodexAdapter implements AgentAdapter {
       }
     }
 
-    fs.writeFileSync(path.join(stageDir, '.gitconfig'), '[safe]\n\tdirectory = *\n');
+    fs.writeFileSync(path.join(stageDir, '.gitconfig'), buildStagedGitConfig(projectRoot));
   }
 
   /** Codex parses the ID token locally; only a synthetic JWT enters Orca sandboxes. */

@@ -7,6 +7,7 @@ import { AntigravityAdapter } from './agents/antigravity.js';
 import { runSandboxSession } from './runner.js';
 import { runAgyChatDaemon, runAgyChatExec, runAgyPolicyAdd } from './agy-chat-sandbox.js';
 import { detectProjectRoot, isSandboxModeEnabled, USER_HOME } from './config.js';
+import { runSandboxDoctor } from '../../orca-plugin/src/sandbox/sandbox-control.ts';
 
 function getAdapter(target: string): AgentAdapter {
   switch (target.toLowerCase()) {
@@ -34,6 +35,19 @@ async function main(): Promise<void> {
 
   if (binaryName.includes('agent-box')) {
     agentTarget = process.argv[2] || '';
+    if (agentTarget === 'doctor') {
+      const report = await runSandboxDoctor(USER_HOME);
+      if (process.argv.includes('--json')) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        console.log(`=== OpenShell Sandbox Doctor (${report.ok ? 'HEALTHY' : 'ISSUES FOUND'}) ===`);
+        for (const check of report.checks) {
+          const icon = check.status === 'pass' ? '[PASS]' : check.status === 'warn' ? '[WARN]' : '[FAIL]';
+          console.log(`  ${icon} ${check.label}: ${check.detail}`);
+        }
+      }
+      process.exit(report.ok ? 0 : 1);
+    }
     if (agentTarget === 'is-sandbox-enabled') {
       const targetDir = process.argv[3] || process.cwd();
       const projRoot = detectProjectRoot(targetDir);
@@ -57,7 +71,7 @@ async function main(): Promise<void> {
       process.exit(code);
     }
     if (!agentTarget || agentTarget.startsWith('-')) {
-      console.log('Usage: agent-box <claude|codex|agy> [options...]');
+      console.log('Usage: agent-box <claude|codex|agy|doctor> [options...]');
       process.exit(0);
     }
     forwardedArgs = process.argv.slice(3);

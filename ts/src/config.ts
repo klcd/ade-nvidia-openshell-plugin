@@ -4,11 +4,14 @@ import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
+  DEFAULT_SANDBOX_ENABLED as SHARED_DEFAULT_SANDBOX_ENABLED,
   DEFAULT_SANDBOX_IDLE_TIMEOUT_SEC as SHARED_DEFAULT_IDLE_TIMEOUT_SEC,
+  getDefaultSandboxEnabled as getSharedDefaultSandboxEnabled,
   getSandboxIdleTimeoutSeconds as getSharedSandboxIdleTimeoutSeconds,
   getSandboxMode,
   getSandboxModeFilePath,
   pruneSandboxRegistryEntry,
+  setDefaultSandboxEnabled as setSharedDefaultSandboxEnabled,
 } from '../../orca-plugin/src/state/sandbox-mode.ts';
 import {
   getSandboxRegistryFilePath,
@@ -19,6 +22,7 @@ import type { SandboxRegistryEntry as SharedSandboxRegistryEntry } from '../../o
 
 export const USER_HOME = os.homedir();
 export const DEBUG_LOG_PATH = path.join(USER_HOME, '.orca', 'openshell-bridge.log');
+export const DEFAULT_SANDBOX_ENABLED = SHARED_DEFAULT_SANDBOX_ENABLED;
 export const DEFAULT_SANDBOX_IDLE_TIMEOUT_SEC = SHARED_DEFAULT_IDLE_TIMEOUT_SEC;
 
 export type SandboxRegistryEntry = SharedSandboxRegistryEntry;
@@ -31,6 +35,14 @@ export interface SandboxIdleTimeoutLookup {
 
 export function getSandboxModePath(homeDir = USER_HOME): string {
   return getSandboxModeFilePath(homeDir);
+}
+
+export function getDefaultSandboxEnabled(homeDir = USER_HOME): boolean {
+  return getSharedDefaultSandboxEnabled(homeDir);
+}
+
+export function setDefaultSandboxEnabled(enabled: boolean, homeDir = USER_HOME): boolean {
+  return setSharedDefaultSandboxEnabled(enabled, homeDir);
 }
 
 export function getSandboxIdleTimeoutSeconds(
@@ -151,4 +163,62 @@ export function registerSandboxSession(
 export function unregisterSandboxSession(sandboxName: string, homeDir = USER_HOME): void {
   if (!sandboxName) return;
   pruneSandboxRegistryEntry(sandboxName, homeDir);
+}
+
+function readGitConfigValue(key: string, cwd?: string): string | null {
+  try {
+    const args = cwd ? ['-C', cwd, 'config', '--get', key] : ['config', '--get', key];
+    const out = execFileSync('git', args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1500,
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+function escapeGitConfigValue(val: string): string {
+  return val.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ').trim();
+}
+
+/**
+ * Builds the staged `/sandbox/.gitconfig` content for OpenShell sandboxes:
+ * 1. Marks all mounted worktrees as safe (`safe.directory = *`).
+ * 2. Rewrites SSH git remotes (`git@github.com:`, `git@gitlab.com:`) to HTTPS so git operations
+ *    inside the sandbox route through the OpenShell L7 HTTPS proxy instead of failing on port 22 / missing SSH keys.
+ * 3. Propagates non-secret host git author identity (`user.name` and `user.email`) so in-sandbox commits succeed.
+ */
+export function buildStagedGitConfig(
+  projectRoot?: string,
+  overrides?: { userName?: string | null; userEmail?: string | null }
+): string {
+  const userName =
+    overrides?.userName !== undefined
+      ? overrides.userName
+      : readGitConfigValue('user.name', projectRoot) || readGitConfigValue('user.name');
+  const userEmail =
+    overrides?.userEmail !== undefined
+      ? overrides.userEmail
+      : readGitConfigValue('user.email', projectRoot) || readGitConfigValue('user.email');
+
+  const lines: string[] = [
+    '[safe]',
+    '\tdirectory = *',
+    '[url "https://github.com/"]',
+    '\tinsteadOf = git@github.com:',
+    '\tinsteadOf = ssh://git@github.com/',
+    '[url "https://gitlab.com/"]',
+    '\tinsteadOf = git@gitlab.com:',
+    '\tinsteadOf = ssh://git@gitlab.com/',
+  ];
+
+  if (userName || userEmail) {
+    lines.push('[user]');
+    if (userName) lines.push(`\tname = "${escapeGitConfigValue(userName)}"`);
+    if (userEmail) lines.push(`\temail = "${escapeGitConfigValue(userEmail)}"`);
+  }
+
+  return lines.join('\n') + '\n';
 }

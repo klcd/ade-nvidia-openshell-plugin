@@ -41,13 +41,17 @@ test('hook denies a supported agent when wrapper is absent', () => {
   activate({ hooks: { on: (_name: string, fn: typeof handler) => { handler = fn } }, log() {} } as any)
   assert.ok(handler)
   const before = process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR
+  const beforeDef = process.env.ORCA_OPENSHELL_DEFAULT_ENABLED
   process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR = '/definitely-not-installed-orca-bridge'
+  process.env.ORCA_OPENSHELL_DEFAULT_ENABLED = '1'
   try {
     const result = handler({ agent: 'codex', workspaceId: 'ws', command: 'codex', env: {} }, x => x)
     assert.match(result.deny, /missing/)
   } finally {
     if (before === undefined) delete process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR
     else process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR = before
+    if (beforeDef === undefined) delete process.env.ORCA_OPENSHELL_DEFAULT_ENABLED
+    else process.env.ORCA_OPENSHELL_DEFAULT_ENABLED = beforeDef
   }
 })
 
@@ -59,8 +63,10 @@ test('hook forwards only nonreserved environment keys accepted by Orca', () => {
   fs.writeFileSync(path.join(policies, 'codex.json'), '{}')
   const oldBin = process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR
   const oldPolicy = process.env.ORCA_OPENSHELL_POLICY_DIR
+  const oldDef = process.env.ORCA_OPENSHELL_DEFAULT_ENABLED
   process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR = dir
   process.env.ORCA_OPENSHELL_POLICY_DIR = policies
+  process.env.ORCA_OPENSHELL_DEFAULT_ENABLED = '1'
   try {
     let handler: ((event: any, next: (event?: any) => any) => any) | undefined
     activate({ hooks: { on: (_name: string, fn: typeof handler) => { handler = fn } }, log() {} } as any)
@@ -80,6 +86,8 @@ test('hook forwards only nonreserved environment keys accepted by Orca', () => {
     else process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR = oldBin
     if (oldPolicy === undefined) delete process.env.ORCA_OPENSHELL_POLICY_DIR
     else process.env.ORCA_OPENSHELL_POLICY_DIR = oldPolicy
+    if (oldDef === undefined) delete process.env.ORCA_OPENSHELL_DEFAULT_ENABLED
+    else process.env.ORCA_OPENSHELL_DEFAULT_ENABLED = oldDef
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -134,6 +142,8 @@ test('parses permission policies coupled to CLI commands and evaluates command c
     assert.equal(report.currentAgent, 'codex')
     assert.equal(report.agents.length, 1)
     assert.equal(report.agents[0].agent, 'codex')
+    assert.equal(report.defaultSandboxEnabled, false)
+    assert.equal(report.sandboxEnabled, false)
 
     const allowEval = evaluateCommandPolicy('git status -s', report)
     assert.equal(allowEval.verdict, 'allow')
@@ -191,7 +201,7 @@ test('parses permission policies coupled to CLI commands and evaluates command c
   }
 })
 
-test('sandbox mode toggle is per-worktree and inherited by child workspaces', async () => {
+test('sandbox mode is off by default, configurable globally, and inherited per-worktree', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-sandbox-toggle-test-'))
   const wtA = path.join(dir, 'worktree-a')
   const wtB = path.join(dir, 'worktree-b')
@@ -219,9 +229,11 @@ test('sandbox mode toggle is per-worktree and inherited by child workspaces', as
   const prevModeFile = process.env.ORCA_OPENSHELL_MODE_FILE
   const prevBinDir = process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR
   const prevPolicyDir = process.env.ORCA_OPENSHELL_POLICY_DIR
+  const prevDef = process.env.ORCA_OPENSHELL_DEFAULT_ENABLED
   process.env.ORCA_OPENSHELL_MODE_FILE = modeFile
   process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR = binDir
   process.env.ORCA_OPENSHELL_POLICY_DIR = policyDir
+  delete process.env.ORCA_OPENSHELL_DEFAULT_ENABLED
   try {
     let handler: ((event: any, next: (event?: any) => any) => any) | undefined
     const panelHandlers = new Map<string, (input: any) => any>()
@@ -232,6 +244,18 @@ test('sandbox mode toggle is per-worktree and inherited by child workspaces', as
     } as any)
     assert.ok(handler)
     assert.ok(panelHandlers.has('setSandboxMode'))
+    assert.ok(panelHandlers.has('setDefaultSandboxMode'))
+
+    // Unconfigured worktrees default to OFF (Host Mode)
+    const initialReportB = buildPolicyReport({ workspacePath: wtB, agent: 'claude' })
+    assert.equal(initialReportB.defaultSandboxEnabled, false)
+    assert.equal(initialReportB.sandboxEnabled, false)
+
+    // Global default can be configured to ON via setDefaultSandboxMode
+    const setDefaultMode = panelHandlers.get('setDefaultSandboxMode')!
+    const afterDefaultOn = await setDefaultMode({ enabled: true, workspacePath: wtB, agent: 'claude' })
+    assert.equal(afterDefaultOn.defaultSandboxEnabled, true)
+    assert.equal(afterDefaultOn.sandboxEnabled, true)
 
     const setMode = panelHandlers.get('setSandboxMode')!
     const disabledReportA = await setMode({
@@ -244,7 +268,7 @@ test('sandbox mode toggle is per-worktree and inherited by child workspaces', as
     assert.equal(disabledReportA.sandboxEnabled, false)
     assert.equal(disabledReportA.sandboxInheritedFrom, null)
 
-    // Worktree B remains sandboxed
+    // Worktree B remains sandboxed via defaultEnabled=true
     const reportB = buildPolicyReport({ workspacePath: wtB, agent: 'claude' })
     assert.equal(reportB.sandboxEnabled, true)
 
@@ -298,6 +322,8 @@ test('sandbox mode toggle is per-worktree and inherited by child workspaces', as
     else process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR = prevBinDir
     if (prevPolicyDir === undefined) delete process.env.ORCA_OPENSHELL_POLICY_DIR
     else process.env.ORCA_OPENSHELL_POLICY_DIR = prevPolicyDir
+    if (prevDef === undefined) delete process.env.ORCA_OPENSHELL_DEFAULT_ENABLED
+    else process.env.ORCA_OPENSHELL_DEFAULT_ENABLED = prevDef
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

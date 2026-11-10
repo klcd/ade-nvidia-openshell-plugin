@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pruneSandboxSessionEgress } from '../../../orca-plugin/src/state/session-egress.ts';
 import {
+  buildStagedGitConfig,
   detectProjectRoot,
   generateSandboxName,
   getSandboxIdleTimeoutSeconds,
@@ -82,7 +83,7 @@ export async function runAgyChatDaemon(
   let sshHost = `openshell-${sandboxName}`;
 
   try {
-    fs.writeFileSync(path.join(stageDir, '.gitconfig'), '[safe]\n\tdirectory = *\n');
+    fs.writeFileSync(path.join(stageDir, '.gitconfig'), buildStagedGitConfig(resolvedRoot));
     const uploads = [
       { source: path.join(stageDir, '.gitconfig'), destination: '/sandbox/.gitconfig' },
       { source: resolvedRoot, destination: '/sandbox' },

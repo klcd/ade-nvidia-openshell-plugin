@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { AgentAdapter, AgentType } from '../types.js';
-import { USER_HOME } from '../config.js';
+import { USER_HOME, buildStagedGitConfig } from '../config.js';
 import { syncWorkspaceBack } from '../sandbox.js';
 
 export class AntigravityAdapter implements AgentAdapter {
@@ -149,8 +149,8 @@ post_onboarding: {
     }
     fs.writeFileSync(path.join(cliDir, 'settings.json'), JSON.stringify(cliSettings, null, 2));
 
-    // 6. Safe git config
-    fs.writeFileSync(path.join(stageDir, '.gitconfig'), '[safe]\n\tdirectory = *\n');
+    // 6. Safe git config + SSH-to-HTTPS rewrite + user identity
+    fs.writeFileSync(path.join(stageDir, '.gitconfig'), buildStagedGitConfig(projectRoot));
   }
 
   public buildExecArgs(

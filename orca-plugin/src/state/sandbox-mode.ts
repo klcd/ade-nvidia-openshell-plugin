@@ -10,6 +10,7 @@ import {
   type SandboxModeQueryOptions,
   type SandboxModeState,
 } from '../types.ts'
+import { readJsonSafe, withStateLock, writeJsonAtomic } from './file-lock.ts'
 import {
   readSandboxRegistryMap,
   removeSandboxRegistryEntryOnly,
@@ -23,6 +24,7 @@ import {
   resolveWorkspacePathById,
 } from './worktree-paths.ts'
 
+export const DEFAULT_SANDBOX_ENABLED = false
 export const DEFAULT_SANDBOX_IDLE_TIMEOUT_SEC = 300
 
 export function getSandboxModeFilePath(homeDir = os.homedir()): string {
@@ -30,6 +32,45 @@ export function getSandboxModeFilePath(homeDir = os.homedir()): string {
     return process.env.ORCA_OPENSHELL_MODE_FILE
   }
   return path.join(homeDir, '.config', 'orca-openshell', 'sandbox-mode.json')
+}
+
+function resolveEnvDefaultSandboxEnabled(): boolean | undefined {
+  const raw = process.env.ORCA_OPENSHELL_DEFAULT_ENABLED
+  if (raw === undefined || raw.trim() === '') return undefined
+  const lower = raw.trim().toLowerCase()
+  if (lower === '1' || lower === 'true' || lower === 'on' || lower === 'yes') return true
+  if (lower === '0' || lower === 'false' || lower === 'off' || lower === 'no') return false
+  return undefined
+}
+
+export function getDefaultSandboxEnabled(homeDir = os.homedir()): boolean {
+  const envVal = resolveEnvDefaultSandboxEnabled()
+  if (envVal !== undefined) return envVal
+  const filePath = getSandboxModeFilePath(homeDir)
+  if (!fs.existsSync(filePath)) return DEFAULT_SANDBOX_ENABLED
+  const parsed = readJsonSafe<SandboxModeFileData>(filePath, {})
+  if (typeof parsed.defaultEnabled === 'boolean') {
+    return parsed.defaultEnabled
+  }
+  if (!parsed.worktrees && typeof parsed.enabled === 'boolean') {
+    return parsed.enabled
+  }
+  return DEFAULT_SANDBOX_ENABLED
+}
+
+export function setDefaultSandboxEnabled(enabled: boolean, homeDir = os.homedir()): boolean {
+  const filePath = getSandboxModeFilePath(homeDir)
+  const normalized = Boolean(enabled)
+  withStateLock(filePath, () => {
+    const existing = readJsonSafe<SandboxModeFileData>(filePath, {})
+    const nextData: SandboxModeFileData = {
+      ...existing,
+      defaultEnabled: normalized,
+      updatedAt: new Date().toISOString(),
+    }
+    writeJsonAtomic(filePath, nextData)
+  })
+  return normalized
 }
 
 export function syncOrcaWorktreeLineage(
@@ -40,27 +81,21 @@ export function syncOrcaWorktreeLineage(
   if (Object.keys(discovered).length === 0) return
   const filePath = getSandboxModeFilePath(homeDir)
   try {
-    let existing: SandboxModeFileData = {}
-    if (fs.existsSync(filePath)) {
-      existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
-    }
-    const prevParents = existing.parentPaths || {}
-    let changed = false
-    const mergedParents: Record<string, string> = { ...prevParents }
-    for (const [childPath, parentPath] of Object.entries(discovered)) {
-      if (mergedParents[childPath] !== parentPath) {
-        mergedParents[childPath] = parentPath
-        changed = true
+    withStateLock(filePath, () => {
+      const existing = readJsonSafe<SandboxModeFileData>(filePath, {})
+      const prevParents = existing.parentPaths || {}
+      let changed = false
+      const mergedParents: Record<string, string> = { ...prevParents }
+      for (const [childPath, parentPath] of Object.entries(discovered)) {
+        if (mergedParents[childPath] !== parentPath) {
+          mergedParents[childPath] = parentPath
+          changed = true
+        }
       }
-    }
-    if (changed) {
-      fs.mkdirSync(path.dirname(filePath), { recursive: true })
-      fs.writeFileSync(
-        filePath,
-        JSON.stringify({ ...existing, parentPaths: mergedParents }, null, 2) + '\n',
-        'utf8'
-      )
-    }
+      if (changed) {
+        writeJsonAtomic(filePath, { ...existing, parentPaths: mergedParents })
+      }
+    })
   } catch {}
 }
 
@@ -72,15 +107,23 @@ export function getSandboxMode(
     typeof optionsOrHomeDir === 'string' ? {} : (optionsOrHomeDir || {})
   const homeDir = typeof optionsOrHomeDir === 'string' ? optionsOrHomeDir : homeDirArg
   const filePath = getSandboxModeFilePath(homeDir)
+  const fallbackDefault = resolveEnvDefaultSandboxEnabled() ?? DEFAULT_SANDBOX_ENABLED
   try {
     if (!fs.existsSync(filePath)) {
-      return { enabled: true, updatedAt: null, inheritedFrom: null }
+      return { enabled: fallbackDefault, updatedAt: null, inheritedFrom: null }
     }
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+    const parsed = readJsonSafe<SandboxModeFileData>(filePath, {})
     const updatedAtFallback = typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null
+    const defaultEnabled =
+      resolveEnvDefaultSandboxEnabled() ??
+      (typeof parsed.defaultEnabled === 'boolean'
+        ? parsed.defaultEnabled
+        : typeof parsed.enabled === 'boolean'
+          ? parsed.enabled
+          : DEFAULT_SANDBOX_ENABLED)
     if (!parsed.worktrees) {
       return {
-        enabled: parsed.enabled !== false,
+        enabled: defaultEnabled,
         updatedAt: updatedAtFallback,
         inheritedFrom: null,
       }
@@ -121,7 +164,7 @@ export function getSandboxMode(
           }
         }
       }
-      return { enabled: true, updatedAt: updatedAtFallback, inheritedFrom: null }
+      return { enabled: defaultEnabled, updatedAt: updatedAtFallback, inheritedFrom: null }
     }
 
     const visited = new Set<string>()
@@ -161,9 +204,9 @@ export function getSandboxMode(
       break
     }
 
-    return { enabled: true, updatedAt: updatedAtFallback, inheritedFrom: null }
+    return { enabled: defaultEnabled, updatedAt: updatedAtFallback, inheritedFrom: null }
   } catch {
-    return { enabled: true, updatedAt: null, inheritedFrom: null }
+    return { enabled: fallbackDefault, updatedAt: null, inheritedFrom: null }
   }
 }
 
@@ -174,63 +217,64 @@ export function setSandboxMode(
 ): SandboxModeState {
   const filePath = getSandboxModeFilePath(homeDir)
   const updatedAt = new Date().toISOString()
-  let existing: SandboxModeFileData = {}
-  try {
-    if (fs.existsSync(filePath)) {
-      existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+  let targetKey = ''
+  let parentPaths: Record<string, string> = {}
+
+  withStateLock(filePath, () => {
+    const existing = readJsonSafe<SandboxModeFileData>(filePath, {})
+
+    const worktrees: Record<string, { enabled: boolean; updatedAt: string; workspaceId?: string }> = {}
+    for (const [k, v] of Object.entries(existing.worktrees || {})) {
+      if (v && typeof v === 'object') {
+        worktrees[normalizeWorktreePath(k)] = v
+      }
     }
-  } catch {}
 
-  const worktrees: Record<string, { enabled: boolean; updatedAt: string; workspaceId?: string }> = {}
-  for (const [k, v] of Object.entries(existing.worktrees || {})) {
-    if (v && typeof v === 'object') {
-      worktrees[normalizeWorktreePath(k)] = v
+    parentPaths = {}
+    for (const [k, v] of Object.entries(collectOrcaWorktreeParentMap(getCachedOrcaWorktrees()))) {
+      parentPaths[k] = v
     }
-  }
-
-  const parentPaths: Record<string, string> = {}
-  for (const [k, v] of Object.entries(collectOrcaWorktreeParentMap(getCachedOrcaWorktrees()))) {
-    parentPaths[k] = v
-  }
-  for (const [k, v] of Object.entries(existing.parentPaths || {})) {
-    if (typeof v === 'string' && v) {
-      parentPaths[normalizeWorktreePath(k)] = normalizeWorktreePath(v)
+    for (const [k, v] of Object.entries(existing.parentPaths || {})) {
+      if (typeof v === 'string' && v) {
+        parentPaths[normalizeWorktreePath(k)] = normalizeWorktreePath(v)
+      }
     }
-  }
-  for (const [k, v] of Object.entries(options?.parentPaths || {})) {
-    if (typeof v === 'string' && v) {
-      parentPaths[normalizeWorktreePath(k)] = normalizeWorktreePath(v)
+    for (const [k, v] of Object.entries(options?.parentPaths || {})) {
+      if (typeof v === 'string' && v) {
+        parentPaths[normalizeWorktreePath(k)] = normalizeWorktreePath(v)
+      }
     }
-  }
 
-  const targetRaw = options?.workspacePath || resolveWorkspacePathById(options?.workspaceId) || process.cwd()
-  const targetKey = normalizeWorktreePath(targetRaw)
+    const targetRaw = options?.workspacePath || resolveWorkspacePathById(options?.workspaceId) || process.cwd()
+    targetKey = normalizeWorktreePath(targetRaw)
 
-  // Propagate parent setting to existing child workspaces by clearing stale child overrides
-  const parentMap = new Map<string, string>(Object.entries(parentPaths))
-  for (const existingKey of Object.keys(worktrees)) {
-    if (existingKey !== targetKey && doesPathDescendFrom(existingKey, targetKey, parentMap)) {
-      delete worktrees[existingKey]
+    // Propagate parent setting to existing child workspaces by clearing stale child overrides
+    const parentMap = new Map<string, string>(Object.entries(parentPaths))
+    for (const existingKey of Object.keys(worktrees)) {
+      if (existingKey !== targetKey && doesPathDescendFrom(existingKey, targetKey, parentMap)) {
+        delete worktrees[existingKey]
+      }
     }
-  }
 
-  worktrees[targetKey] = {
-    enabled: Boolean(enabled),
-    updatedAt,
-    ...(options?.workspaceId ? { workspaceId: options.workspaceId } : {}),
-  }
+    worktrees[targetKey] = {
+      enabled: Boolean(enabled),
+      updatedAt,
+      ...(options?.workspaceId ? { workspaceId: options.workspaceId } : {}),
+    }
 
-  const nextData: SandboxModeFileData = {
-    updatedAt,
-    ...(existing.tabIdleTimeouts && Object.keys(existing.tabIdleTimeouts).length > 0
-      ? { tabIdleTimeouts: existing.tabIdleTimeouts }
-      : {}),
-    worktrees,
-    ...(Object.keys(parentPaths).length > 0 ? { parentPaths } : {}),
-  }
+    const nextData: SandboxModeFileData = {
+      updatedAt,
+      ...(typeof existing.defaultEnabled === 'boolean' ? { defaultEnabled: existing.defaultEnabled } : {}),
+      ...(existing.tabIdleTimeouts && Object.keys(existing.tabIdleTimeouts).length > 0
+        ? { tabIdleTimeouts: existing.tabIdleTimeouts }
+        : {}),
+      worktrees,
+      ...(Object.keys(parentPaths).length > 0 ? { parentPaths } : {}),
+    }
 
-  fs.mkdirSync(path.dirname(filePath), { recursive: true })
-  fs.writeFileSync(filePath, JSON.stringify(nextData, null, 2) + '\n', 'utf8')
+    writeJsonAtomic(filePath, nextData)
+  })
+
   return getSandboxMode(
     { workspacePath: targetKey, workspaceId: options?.workspaceId, parentPaths },
     homeDir
@@ -302,7 +346,7 @@ export function getSandboxIdleTimeoutSeconds(
   const filePath = getSandboxModeFilePath(homeDir)
   try {
     if (!fs.existsSync(filePath)) return DEFAULT_SANDBOX_IDLE_TIMEOUT_SEC
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
+    const parsed = readJsonSafe<SandboxModeFileData>(filePath, {})
     const tabMap = parsed.tabIdleTimeouts
     if (tabMap && typeof tabMap === 'object') {
       const candidateKeys = resolveTabIdleTimeoutKeys(opts, homeDir, useEnvFallback)
@@ -333,31 +377,27 @@ export function setSandboxIdleTimeoutSeconds(
     typeof optionsOrHomeDir === 'string' ? {} : (optionsOrHomeDir || {})
   const homeDir = typeof optionsOrHomeDir === 'string' ? optionsOrHomeDir : homeDirArg
   const filePath = getSandboxModeFilePath(homeDir)
-  let existing: SandboxModeFileData = {}
-  try {
-    if (fs.existsSync(filePath)) {
-      existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
-    }
-  } catch {}
-
-  const updatedAt = new Date().toISOString()
-  const tabIdleTimeouts: Record<string, { seconds: number; updatedAt: string }> = {
-    ...(existing.tabIdleTimeouts || {}),
-  }
   const keys = resolveTabIdleTimeoutKeys(opts, homeDir)
   const targetKeys = keys.length > 0 ? keys : ['unassigned:default']
-  for (const key of targetKeys) {
-    tabIdleTimeouts[key] = { seconds: normalized, updatedAt }
-  }
 
-  const { idleTimeoutSeconds: _legacyGlobalTimeout, ...restExisting } = existing
-  const nextData: SandboxModeFileData = {
-    ...restExisting,
-    updatedAt,
-    tabIdleTimeouts,
-  }
-  fs.mkdirSync(path.dirname(filePath), { recursive: true })
-  fs.writeFileSync(filePath, JSON.stringify(nextData, null, 2) + '\n', 'utf8')
+  withStateLock(filePath, () => {
+    const existing = readJsonSafe<SandboxModeFileData>(filePath, {})
+    const updatedAt = new Date().toISOString()
+    const tabIdleTimeouts: Record<string, { seconds: number; updatedAt: string }> = {
+      ...(existing.tabIdleTimeouts || {}),
+    }
+    for (const key of targetKeys) {
+      tabIdleTimeouts[key] = { seconds: normalized, updatedAt }
+    }
+
+    const { idleTimeoutSeconds: _legacyGlobalTimeout, ...restExisting } = existing
+    const nextData: SandboxModeFileData = {
+      ...restExisting,
+      updatedAt,
+      tabIdleTimeouts,
+    }
+    writeJsonAtomic(filePath, nextData)
+  })
   return normalized
 }
 
@@ -366,14 +406,14 @@ export function pruneSandboxIdleTimeout(sandboxName: string, homeDir = os.homedi
   const filePath = getSandboxModeFilePath(homeDir)
   try {
     if (!fs.existsSync(filePath)) return
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SandboxModeFileData
-    const sbKey = `sandbox:${sandboxName}`
-    if (parsed?.tabIdleTimeouts && sbKey in parsed.tabIdleTimeouts) {
-      delete parsed.tabIdleTimeouts[sbKey]
-      const tmpMode = `${filePath}.${process.pid}.tmp`
-      fs.writeFileSync(tmpMode, JSON.stringify(parsed, null, 2) + '\n', 'utf8')
-      fs.renameSync(tmpMode, filePath)
-    }
+    withStateLock(filePath, () => {
+      const parsed = readJsonSafe<SandboxModeFileData>(filePath, {})
+      const sbKey = `sandbox:${sandboxName}`
+      if (parsed?.tabIdleTimeouts && sbKey in parsed.tabIdleTimeouts) {
+        delete parsed.tabIdleTimeouts[sbKey]
+        writeJsonAtomic(filePath, parsed)
+      }
+    })
   } catch {}
 }
 

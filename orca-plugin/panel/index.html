@@ -512,6 +512,8 @@ details.egress-fold[open] > summary .fold-chevron {
   // orca-plugin/src/panel/state.ts
   var panelState = {
     currentReport: null,
+    doctorReport: null,
+    runningDoctor: false,
     activeTab: "cli",
     searchFilter: "",
     actionFilter: "all",
@@ -903,6 +905,19 @@ details.egress-fold[open] > summary .fold-chevron {
     const currentSb = (report.activeSandboxes || [])[0] || null;
     const isCurrentSbStopped = Boolean(currentSb && /stopped/i.test(currentSb.phase || ""));
     const isCurrentSbReady = Boolean(currentSb && /ready|running/i.test(currentSb.phase || ""));
+    const defaultEnabled = report.defaultSandboxEnabled === true;
+    const defaultModeControlHtml = `
+    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Default Sandbox State</span>
+        <span class="sub">Global default for new or unconfigured worktrees (override per worktree using the top <code class="mono">Sandbox</code> toggle).</span>
+      </div>
+      <select id="defaultSandboxModeSelect" style="max-width:150px;flex-shrink:0;" title="Default OpenShell sandbox state for unconfigured worktrees">
+        <option value="off" ${!defaultEnabled ? "selected" : ""}>Off (Host Mode)</option>
+        <option value="on" ${defaultEnabled ? "selected" : ""}>On (Enforced)</option>
+      </select>
+    </div>
+  `;
     const idleSec = typeof report.sandboxIdleTimeoutSeconds === "number" ? report.sandboxIdleTimeoutSeconds : 300;
     const presetIdleValues = [0, 60, 180, 300, 600, 900];
     const customIdleOption = !presetIdleValues.includes(idleSec) ? `<option value="${idleSec}" selected>${idleSec}s (Custom)</option>` : "";
@@ -941,6 +956,32 @@ details.egress-fold[open] > summary .fold-chevron {
           </div>
         `;
     })() : `<div class="sub">No sandbox container running for this tab yet.</div>`;
+    const docReport = panelState.doctorReport;
+    const docChecksHtml = docReport ? `<div style="display:flex;flex-direction:column;gap:4px;padding:6px 8px;background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;">
+        ${docReport.checks.map((c) => {
+      const dot = c.status === "pass" ? "rw" : c.status === "warn" ? "l7" : "deny";
+      return `<div class="cmd-meta" style="align-items:center;justify-content:space-between;gap:8px;">
+              <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+                <span class="access-dot ${dot}" title="${escapeHtml(c.status)}"></span>
+                <strong style="color:var(--fg);white-space:nowrap;">${escapeHtml(c.label)}:</strong>
+                <span class="sub" style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(c.detail)}</span>
+              </div>
+              <span class="badge ${c.status === "pass" ? "allow" : c.status === "warn" ? "warn" : "deny"}">${escapeHtml(c.status.toUpperCase())}</span>
+            </div>`;
+    }).join("")}
+      </div>` : "";
+    const doctorControlHtml = `
+    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">System Health &amp; Registry</span>
+        <span class="sub">Verifies OpenShell gateway, host wrappers, base L7 policies, and reconciles stale session entries.</span>
+      </div>
+      <button id="runDoctorBtn" class="copy-btn" ${panelState.runningDoctor ? "disabled" : ""} title="Run OpenShell environment diagnostics and prune stale registry entries">
+        ${panelState.runningDoctor ? "Checking..." : "Run Doctor"}
+      </button>
+    </div>
+    ${docChecksHtml}
+  `;
     return `
     <details class="app-fold" data-section="sys-sb" open>
       <summary>
@@ -953,7 +994,9 @@ details.egress-fold[open] > summary .fold-chevron {
       </summary>
       <div class="app-fold-body">
         ${currentSbCardHtml}
+        ${defaultModeControlHtml}
         ${idleControlHtml}
+        ${doctorControlHtml}
       </div>
     </details>
 
@@ -1169,7 +1212,7 @@ details.egress-fold[open] > summary .fold-chevron {
     try {
       const res = await window.orca.plugin.request("getPolicyReport", {});
       const prev = panelState.currentReport;
-      const changedContext = !prev || prev.sandboxEnabled !== res.sandboxEnabled || prev.sandboxIdleTimeoutSeconds !== res.sandboxIdleTimeoutSeconds || prev.selectedWorkspace.path !== res.selectedWorkspace.path || prev.currentAgent !== res.currentAgent || sandboxesSignature(prev) !== sandboxesSignature(res) || endpointsSignature(prev) !== endpointsSignature(res);
+      const changedContext = !prev || prev.sandboxEnabled !== res.sandboxEnabled || prev.defaultSandboxEnabled !== res.defaultSandboxEnabled || prev.sandboxIdleTimeoutSeconds !== res.sandboxIdleTimeoutSeconds || prev.selectedWorkspace.path !== res.selectedWorkspace.path || prev.currentAgent !== res.currentAgent || sandboxesSignature(prev) !== sandboxesSignature(res) || endpointsSignature(prev) !== endpointsSignature(res);
       panelState.currentReport = res;
       renderHeader();
       const activeElId = document.activeElement?.id || "";
@@ -1228,6 +1271,29 @@ details.egress-fold[open] > summary .fold-chevron {
       container.innerHTML = renderEgressTab();
     else
       container.innerHTML = renderSystemTab();
+    const defaultSandboxModeSelect = document.getElementById("defaultSandboxModeSelect");
+    if (defaultSandboxModeSelect) {
+      defaultSandboxModeSelect.addEventListener("change", async (e) => {
+        const enabled = e.target.value === "on";
+        defaultSandboxModeSelect.disabled = true;
+        try {
+          const report = panelState.currentReport;
+          const res = await window.orca.plugin.request("setDefaultSandboxMode", {
+            enabled,
+            workspacePath: report?.selectedWorkspace?.path,
+            agent: report?.currentAgent
+          });
+          if (res) {
+            panelState.currentReport = res;
+            renderHeader();
+            renderActiveTab();
+          }
+        } catch {
+        } finally {
+          defaultSandboxModeSelect.disabled = false;
+        }
+      });
+    }
     const idleTimeoutSelect = document.getElementById("idleTimeoutSelect");
     if (idleTimeoutSelect) {
       idleTimeoutSelect.addEventListener("change", async (e) => {
@@ -1250,6 +1316,33 @@ details.egress-fold[open] > summary .fold-chevron {
         } catch {
         } finally {
           idleTimeoutSelect.disabled = false;
+        }
+      });
+    }
+    const runDoctorBtn = document.getElementById("runDoctorBtn");
+    if (runDoctorBtn) {
+      runDoctorBtn.addEventListener("click", async () => {
+        if (panelState.runningDoctor)
+          return;
+        panelState.runningDoctor = true;
+        renderActiveTab();
+        try {
+          const report = panelState.currentReport;
+          const res = await window.orca.plugin.request("runDoctor", {
+            workspacePath: report?.selectedWorkspace?.path,
+            agent: report?.currentAgent
+          });
+          if (res?.doctor) {
+            panelState.doctorReport = res.doctor;
+          }
+          if (res?.report) {
+            panelState.currentReport = res.report;
+            renderHeader();
+          }
+        } catch {
+        } finally {
+          panelState.runningDoctor = false;
+          renderActiveTab();
         }
       });
     }

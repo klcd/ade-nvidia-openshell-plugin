@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { AgentAdapter, AgentType } from '../types.js';
-import { USER_HOME, detectProjectRoot } from '../config.js';
+import { USER_HOME, buildStagedGitConfig, detectProjectRoot } from '../config.js';
 import { getClaudeOAuthToken } from '../keychain.js';
 import { syncWorkspaceBack } from '../sandbox.js';
 
@@ -213,8 +213,8 @@ export class ClaudeAdapter implements AgentAdapter {
 
     fs.writeFileSync(path.join(stageDir, '.claude.json'), JSON.stringify(config, null, 2));
 
-    // 6. Safe git directory configuration
-    fs.writeFileSync(path.join(stageDir, '.gitconfig'), '[safe]\n\tdirectory = *\n');
+    // 6. Safe git directory configuration + SSH-to-HTTPS rewrite + user identity
+    fs.writeFileSync(path.join(stageDir, '.gitconfig'), buildStagedGitConfig(projectRoot));
   }
 
   public buildExecArgs(
