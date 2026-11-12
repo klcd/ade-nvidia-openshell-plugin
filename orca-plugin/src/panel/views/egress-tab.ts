@@ -93,38 +93,42 @@ export function renderEgressTab(): string {
         : isProject
           ? `<span class="badge allow" title="Saved in project rules (.agents/policies)">Project</span>`
           : ''
-      const explanationText =
-        ep.triggerExplanation ||
-        `Outbound network egress to ${ep.host}:${ep.port} triggered by ${(ep.compatibleCliCommands || []).join(', ')} (defined in ${ep.source}).`
-      const l7Html =
-        (ep.l7Rules || []).length > 0
-          ? `<div class="chips" style="margin-top:2px;">${ep.l7Rules!
-              .map(
-                r =>
-                  `<span class="right-pill"><span class="access-dot ${r.action === 'deny' ? 'deny' : 'rw'}" style="width:6px;height:6px;box-shadow:none;"></span>${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`
-              )
-              .join('')}</div>`
-          : ''
+      const binariesLabel =
+        ep.binaries && ep.binaries.length > 0 ? ep.binaries.join(', ') : `/usr/local/bin/${triggerLabel}`
+      const policySourceLabel = ep.sourcePath || ep.source || 'policy'
+      const boxTooltipLines = [
+        `Binary: ${binariesLabel}`,
+        `Policy: ${policySourceLabel} (${ep.policyName})`,
+        ...(ep.triggerExplanation ? [ep.triggerExplanation] : []),
+      ]
+      const boxTooltip = boxTooltipLines.join('\n')
+
+      const effectiveL7Rules =
+        ep.l7Rules && ep.l7Rules.length > 0
+          ? ep.l7Rules
+          : [{ action: 'allow' as const, method: '*', path: '/**' }]
+      const l7Html = `<div class="chips">${effectiveL7Rules
+        .map(
+          r =>
+            `<span class="right-pill" title="L7 HTTP Rule (${escapeHtml(policySourceLabel)})"><span class="access-dot ${r.action === 'deny' ? 'deny' : 'rw'}" style="width:6px;height:6px;box-shadow:none;"></span>${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`
+        )
+        .join('')}</div>`
       const cliChipsHtml =
         (ep.compatibleCliCommands || []).length > 0
           ? `<div class="chips">${ep.compatibleCliCommands
               .map(
                 cmd =>
-                  `<button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cmd.replace(/<[^>]+>/g, 'test'))}">${escapeHtml(cmd)}</button>`
+                  `<button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cmd.replace(/<[^>]+>/g, 'test'))}" title="${escapeHtml(`${boxTooltip}\nClick to load into Test CLI Command`)}">${escapeHtml(cmd)}</button>`
               )
               .join('')}</div>`
           : ''
-      const firstL7 = (ep.l7Rules && ep.l7Rules[0]) || {
-        action: 'allow' as const,
-        method: 'GET',
-        path: '/**',
-      }
+      const firstL7 = effectiveL7Rules[0]
       const tempActionsHtml = isTemporary
         ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;">
             <button
               class="copy-btn primary promote-temp-btn"
               data-host="${escapeHtml(ep.host)}"
-              data-port="${escapeHtml(ep.port || 443)}"
+              data-port="${escapeHtml(String(ep.port || 443))}"
               data-action="${escapeHtml(firstL7.action || 'allow')}"
               data-method="${escapeHtml(firstL7.method || 'GET')}"
               data-path="${escapeHtml(firstL7.path || '/**')}"
@@ -133,7 +137,7 @@ export function renderEgressTab(): string {
             <button
               class="copy-btn remove-temp-btn"
               data-host="${escapeHtml(ep.host)}"
-              data-port="${escapeHtml(ep.port || 443)}"
+              data-port="${escapeHtml(String(ep.port || 443))}"
               title="Remove temporary rule tag from session"
             >Remove</button>
           </div>`
@@ -141,27 +145,23 @@ export function renderEgressTab(): string {
 
       return `
         <details class="egress-fold" data-egress="${escapeHtml(epKey)}" ${isOpen ? 'open' : ''}>
-          <summary>
+          <summary title="${escapeHtml(boxTooltip)}">
             <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
               <span class="fold-chevron">&#9654;</span>
               <span class="access-dot ${dotClass}" title="Right: ${escapeHtml(ep.access)}"></span>
-              <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(ep.host)}${ep.port && ep.port !== 443 ? ':' + escapeHtml(ep.port) : ''}</span>
+              <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(ep.host)}${ep.port && ep.port !== 443 ? ':' + escapeHtml(String(ep.port)) : ''}</span>
               ${scopeBadgeHtml}
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              <span class="source-pill">&#8984; ${escapeHtml(triggerLabel)}</span>
+              <span class="source-pill" title="${escapeHtml(boxTooltip)}">&#8984; ${escapeHtml(triggerLabel)}</span>
             </div>
           </summary>
           <div class="egress-fold-body">
-            <div style="color:var(--fg);line-height:1.45;">
-              ${escapeHtml(explanationText)}
-            </div>
-            ${l7Html}
-            ${tempActionsHtml}
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;margin-top:2px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+              ${l7Html}
               ${cliChipsHtml}
-              <span class="sub mono">${escapeHtml(ep.sourcePath || ep.source)}</span>
             </div>
+            ${tempActionsHtml}
           </div>
         </details>
       `
