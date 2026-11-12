@@ -45,42 +45,31 @@ export function renderCliTab(): string {
 
       const rows = rules
         .map(r => {
-          const ruleKey = `${r.scope}:${r.sourceFile}:${r.raw}`
-          const isRuleOpen = panelState.openCliRules.has(ruleKey)
           const dotClass = r.action === 'deny' ? 'deny' : r.action === 'ask' ? 'l7' : 'rw'
           const cleanCmd = r.cliCommand.replace(/\s*\[args\.\.\.\]/, '')
           const scopePath =
             r.scope === 'global'
               ? `~/.agents/permissions/${r.sourceFile}`
               : `.agents/permissions/${r.sourceFile}`
-          const explanation =
-            r.explanation || `${r.action.toUpperCase()} rule for ${r.cliCommand} (${scopePath}).`
+          const tooltipLines = [
+            `${r.action.toUpperCase()} • ${r.raw}`,
+            `Policy: ${r.groupName} (${scopePath})`,
+            ...(r.groupDescription ? [r.groupDescription] : []),
+          ]
+          const tooltip = tooltipLines.join('\n')
 
           return `
-            <details class="egress-fold" data-cli-rule="${escapeHtml(ruleKey)}" ${isRuleOpen ? 'open' : ''}>
-              <summary>
-                <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-                  <span class="fold-chevron">&#9654;</span>
-                  <span class="access-dot ${dotClass}" title="Right: ${escapeHtml(r.action)}"></span>
-                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.cliCommand)}</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-                  <span class="source-pill">&#8984; ${escapeHtml(r.groupName)}</span>
-                </div>
-              </summary>
-              <div class="egress-fold-body">
-                <div style="color:var(--fg);line-height:1.45;">
-                  ${escapeHtml(explanation)}
-                </div>
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:2px;">
-                  <span class="sub mono">${escapeHtml(scopePath)} &bull; ${escapeHtml(r.raw)}</span>
-                  <div style="display:flex;gap:4px;">
-                    <button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cleanCmd)}">Test</button>
-                    <button class="copy-btn" data-copy="${escapeHtml(cleanCmd)}">Copy</button>
-                  </div>
-                </div>
+            <div class="cmd-row" title="${escapeHtml(tooltip)}">
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="access-dot ${dotClass}" title="${escapeHtml(r.action.toUpperCase())}"></span>
+                <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.cliCommand)}</span>
               </div>
-            </details>
+              <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+                <span class="source-pill">&#8984; ${escapeHtml(r.groupName)}</span>
+                <button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cleanCmd)}" title="Load into Test CLI Command">Test</button>
+                <button class="copy-btn" data-copy="${escapeHtml(cleanCmd)}" title="Copy command">Copy</button>
+              </div>
+            </div>
           `
         })
         .join('')

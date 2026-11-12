@@ -601,37 +601,27 @@ details.egress-fold[open] > summary .fold-chevron {
       const isOpen = Boolean(panelState.searchFilter) || panelState.openApps.has(appName);
       const appDotClass = denyCount > 0 && allowCount === 0 ? "deny" : askCount > 0 && allowCount === 0 ? "l7" : "rw";
       const rows = rules.map((r) => {
-        const ruleKey = `${r.scope}:${r.sourceFile}:${r.raw}`;
-        const isRuleOpen = panelState.openCliRules.has(ruleKey);
         const dotClass = r.action === "deny" ? "deny" : r.action === "ask" ? "l7" : "rw";
         const cleanCmd = r.cliCommand.replace(/\s*\[args\.\.\.\]/, "");
         const scopePath = r.scope === "global" ? `~/.agents/permissions/${r.sourceFile}` : `.agents/permissions/${r.sourceFile}`;
-        const explanation = r.explanation || `${r.action.toUpperCase()} rule for ${r.cliCommand} (${scopePath}).`;
+        const tooltipLines = [
+          `${r.action.toUpperCase()} \u2022 ${r.raw}`,
+          `Policy: ${r.groupName} (${scopePath})`,
+          ...r.groupDescription ? [r.groupDescription] : []
+        ];
+        const tooltip = tooltipLines.join("\n");
         return `
-            <details class="egress-fold" data-cli-rule="${escapeHtml(ruleKey)}" ${isRuleOpen ? "open" : ""}>
-              <summary>
-                <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-                  <span class="fold-chevron">&#9654;</span>
-                  <span class="access-dot ${dotClass}" title="Right: ${escapeHtml(r.action)}"></span>
-                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.cliCommand)}</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-                  <span class="source-pill">&#8984; ${escapeHtml(r.groupName)}</span>
-                </div>
-              </summary>
-              <div class="egress-fold-body">
-                <div style="color:var(--fg);line-height:1.45;">
-                  ${escapeHtml(explanation)}
-                </div>
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:2px;">
-                  <span class="sub mono">${escapeHtml(scopePath)} &bull; ${escapeHtml(r.raw)}</span>
-                  <div style="display:flex;gap:4px;">
-                    <button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cleanCmd)}">Test</button>
-                    <button class="copy-btn" data-copy="${escapeHtml(cleanCmd)}">Copy</button>
-                  </div>
-                </div>
+            <div class="cmd-row" title="${escapeHtml(tooltip)}">
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="access-dot ${dotClass}" title="${escapeHtml(r.action.toUpperCase())}"></span>
+                <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.cliCommand)}</span>
               </div>
-            </details>
+              <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+                <span class="source-pill">&#8984; ${escapeHtml(r.groupName)}</span>
+                <button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cleanCmd)}" title="Load into Test CLI Command">Test</button>
+                <button class="copy-btn" data-copy="${escapeHtml(cleanCmd)}" title="Copy command">Copy</button>
+              </div>
+            </div>
           `;
       }).join("");
       return `
@@ -845,77 +835,47 @@ details.egress-fold[open] > summary .fold-chevron {
       ...a.filesystemReadOnly.map((p) => ({ path: p, access: "read-only", dot: "ro" }))
     ];
     const fsCardsHtml = fsEntries.map((item) => {
-      const key = `fs:${item.access}:${item.path}`;
-      const isOpen = panelState.openSystemItems.has(key);
       const info = describeMountPath(item.path, item.access, wsName, a.agent);
+      const tooltip = `Landlock (${item.access}) \u2022 ${info.sourceFile}\n${info.explanation}`;
       return `
-        <details class="egress-fold" data-sys-item="${escapeHtml(key)}" ${isOpen ? "open" : ""}>
-          <summary>
-            <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-              <span class="fold-chevron">&#9654;</span>
-              <span class="access-dot ${item.dot}" title="Landlock: ${escapeHtml(item.access)}"></span>
-              <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.path)}</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              <span class="source-pill">&#8984; ${escapeHtml(info.source)}</span>
-            </div>
-          </summary>
-          <div class="egress-fold-body">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
-              <span style="color:var(--fg);">${escapeHtml(info.explanation)}</span>
-              <span class="sub mono">${escapeHtml(info.sourceFile)}</span>
-            </div>
+        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+            <span class="access-dot ${item.dot}" title="Landlock: ${escapeHtml(item.access)}"></span>
+            <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.path)}</span>
           </div>
-        </details>
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span class="source-pill">&#8984; ${escapeHtml(info.source)}</span>
+          </div>
+        </div>
       `;
     }).join("");
     const envCardsHtml = a.credentialPlaceholders.map((envKey) => {
-      const key = `env:${envKey}`;
-      const isOpen = panelState.openSystemItems.has(key);
+      const tooltip = `openshell:resolve \u2022 ${a.providerProfile}.profile.yaml\nProxy-injected credential placeholder (never readable in plain text inside the sandbox).`;
       return `
-        <details class="egress-fold" data-sys-item="${escapeHtml(key)}" ${isOpen ? "open" : ""}>
-          <summary>
-            <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-              <span class="fold-chevron">&#9654;</span>
-              <span class="access-dot l7" title="Supervisor-resolved credential placeholder"></span>
-              <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(envKey)}</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              <span class="source-pill">&#8984; openshell:resolve</span>
-            </div>
-          </summary>
-          <div class="egress-fold-body">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
-              <span style="color:var(--fg);">Proxy-injected credential placeholder (never readable in plain text inside the sandbox).</span>
-              <span class="sub mono">${escapeHtml(a.providerProfile)}.profile.yaml</span>
-            </div>
+        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+            <span class="access-dot l7" title="Supervisor-resolved credential placeholder"></span>
+            <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(envKey)}</span>
           </div>
-        </details>
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span class="source-pill">&#8984; openshell:resolve</span>
+          </div>
+        </div>
       `;
     }).join("");
     const binCardsHtml = a.allowedBinaries.map((binPath) => {
-      const key = `bin:${binPath}`;
-      const isOpen = panelState.openSystemItems.has(key);
       const baseName = binPath.split("/").pop() || binPath;
+      const tooltip = `Executable container binary inside ${a.containerImage} (${a.hostWrapper})`;
       return `
-        <details class="egress-fold" data-sys-item="${escapeHtml(key)}" ${isOpen ? "open" : ""}>
-          <summary>
-            <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-              <span class="fold-chevron">&#9654;</span>
-              <span class="access-dot ro" title="Executable container binary"></span>
-              <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(binPath)}</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              <span class="source-pill">&#8984; ${escapeHtml(baseName)}</span>
-            </div>
-          </summary>
-          <div class="egress-fold-body">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
-              <span style="color:var(--fg);">Permitted runtime binary inside <code class="mono">${escapeHtml(a.containerImage)}</code>.</span>
-              <span class="sub mono">${escapeHtml(a.hostWrapper)}</span>
-            </div>
+        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+            <span class="access-dot ro" title="Executable container binary"></span>
+            <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(binPath)}</span>
           </div>
-        </details>
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span class="source-pill">&#8984; ${escapeHtml(baseName)}</span>
+          </div>
+        </div>
       `;
     }).join("");
     const currentSb = (report.activeSandboxes || [])[0] || null;
