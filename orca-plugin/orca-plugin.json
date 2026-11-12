@@ -2,13 +2,21 @@
   "manifestVersion": 2,
   "id": "openshell-bridge",
   "name": "OpenShell Bridge",
-  "version": "0.3.0",
-  "description": "Route Orca agent launches through OpenShell sandboxes, inspect allowed Landlock/network/CLI command policies, and bind restricted orchestration delegation.",
+  "version": "0.3.1",
+  "description": "Route Orca agent launches through NVIDIA OpenShell disposable Linux sandboxes. Includes 1-click worktree sandbox toggling, L7 egress approval popups, and an interactive policy inspector panel.",
+  "homepage": "https://github.com/klcd/ade-nvidia-openshell-plugin",
+  "repository": "https://github.com/klcd/ade-nvidia-openshell-plugin",
+  "license": "MIT",
+  "icon": "assets/icon.png",
+  "screenshots": [
+    {
+      "path": "assets/screenshot-policies.png",
+      "alt": "OpenShell Policies inspector panel with CLI command evaluator, Landlock permissions, and network egress rules"
+    }
+  ],
   "engines": {
     "orca": ">=1.4.248"
   },
-  "repository": "https://github.com/klcd/ade-nvidia-openshell-plugin",
-  "license": "MIT",
   "execution": "trusted-worker",
   "pluginApi": 1,
   "main": "src/worker.ts",
