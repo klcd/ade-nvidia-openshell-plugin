@@ -113,10 +113,10 @@ export default function activate(orca: OrcaWorkerApi): void {
       const text = !enabled ? 'Hostmode' : 'Sandbox'
       const tone = !enabled ? 'warning' : isRunning ? 'accent' : 'success'
       const tooltip = !enabled
-        ? `OpenShell: Off (Host Mode) — Project: ${report.selectedWorkspace.name}. Click to enable Sandbox for this worktree.`
+        ? `Hostmode (${report.selectedWorkspace.name}) — Running directly on the host. Click to work inside an OpenShell sandbox.`
         : currentSb
-          ? `OpenShell (${report.currentAgent}): ${currentSb.name} (${isPaused ? 'Paused' : currentSb.phase}, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to switch to Hostmode.`
-          : `OpenShell (${report.currentAgent}): On (Enforced, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to switch to Hostmode.`
+          ? `Working inside OpenShell sandbox ${currentSb.name} (${report.currentAgent}, ${isPaused ? 'Paused' : currentSb.phase}, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to work directly on the host (Hostmode).`
+          : `Working inside an OpenShell sandbox (${report.currentAgent}, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to work directly on the host (Hostmode).`
       void orca.host.call('statusBar.update', {
         id: 'openshell-status',
         text,

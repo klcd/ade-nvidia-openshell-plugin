@@ -272,13 +272,13 @@ test('sandbox mode is off by default, configurable globally, and inherited per-w
     assert.match(toggleOnMsg, /On \(Enforced\)/)
     assert.equal(buildPolicyReport({ workspacePath: wtB, agent: 'claude' }).sandboxEnabled, true)
     assert.equal(statusBarUpdates.at(-1)?.text, 'Sandbox')
-    assert.match(statusBarUpdates.at(-1)?.tooltip || '', /OpenShell \([a-z0-9_-]+\): On \(Enforced/i)
+    assert.match(statusBarUpdates.at(-1)?.tooltip || '', /Working inside.*OpenShell sandbox/i)
 
     const toggleOffMsg = await statusBarToggleCmd({ workspacePath: wtB })
     assert.match(toggleOffMsg, /Off \(Host Mode\)/)
     assert.equal(buildPolicyReport({ workspacePath: wtB, agent: 'claude' }).sandboxEnabled, false)
     assert.equal(statusBarUpdates.at(-1)?.text, 'Hostmode')
-    assert.match(statusBarUpdates.at(-1)?.tooltip || '', /OpenShell: Off \(Host Mode\)/)
+    assert.match(statusBarUpdates.at(-1)?.tooltip || '', /Click to work inside an OpenShell sandbox/i)
 
     // Test CLI Command execution in Host Mode returns stdout & exitCode, and skips automatic execution on DENY
     const evaluateCmd = panelHandlers.get('evaluateCommand')!

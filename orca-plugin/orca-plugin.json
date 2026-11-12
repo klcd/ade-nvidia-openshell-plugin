@@ -34,7 +34,7 @@
         "text": "Hostmode",
         "icon": "layers",
         "tone": "warning",
-        "tooltip": "OpenShell Sandboxing: Off (Host Mode). Click to toggle Sandbox On/Off for the active worktree.",
+        "tooltip": "Running directly on the host. Click to work inside an OpenShell sandbox in this worktree.",
         "command": "openshell.inspectPolicies"
       }
     ]
