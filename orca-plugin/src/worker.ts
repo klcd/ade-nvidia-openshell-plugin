@@ -110,19 +110,13 @@ export default function activate(orca: OrcaWorkerApi): void {
       const isRunning = Boolean(currentSb && !isPaused)
       const egressCount = report.agents[0]?.endpoints?.length || 0
       const enabled = report.sandboxEnabled !== false
-      const text = !enabled
-        ? 'OpenShell: Off (Host Mode)'
-        : isRunning
-          ? `OpenShell (${report.currentAgent}): ${currentSb!.name}`
-          : isPaused
-            ? `OpenShell (${report.currentAgent}): ${currentSb!.name} (Paused)`
-            : `OpenShell (${report.currentAgent}): On (Enforced)`
+      const text = !enabled ? 'Hostmode' : 'Sandbox'
       const tone = !enabled ? 'warning' : isRunning ? 'accent' : 'success'
       const tooltip = !enabled
-        ? `Project: ${report.selectedWorkspace.name} — Sandboxing is Off (Host Mode). Click to enable OpenShell Sandbox for this worktree.`
+        ? `OpenShell: Off (Host Mode) — Project: ${report.selectedWorkspace.name}. Click to enable Sandbox for this worktree.`
         : currentSb
-          ? `Project: ${report.selectedWorkspace.name} — Current tab sandbox: ${currentSb.name} (${isPaused ? 'Paused' : currentSb.phase}, ${egressCount} egress hosts). Click to switch worktree to Host Mode (Off).`
-          : `Project: ${report.selectedWorkspace.name} — Sandboxing is On (Enforced, ${egressCount} egress hosts). Click to switch worktree to Host Mode (Off).`
+          ? `OpenShell (${report.currentAgent}): ${currentSb.name} (${isPaused ? 'Paused' : currentSb.phase}, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to switch to Hostmode.`
+          : `OpenShell (${report.currentAgent}): On (Enforced, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to switch to Hostmode.`
       void orca.host.call('statusBar.update', {
         id: 'openshell-status',
         text,

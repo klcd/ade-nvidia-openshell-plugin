@@ -31,10 +31,10 @@
     "statusBarItems": [
       {
         "id": "openshell-status",
-        "text": "OpenShell: Off (Host Mode)",
+        "text": "Hostmode",
         "icon": "layers",
         "tone": "warning",
-        "tooltip": "Click to toggle OpenShell Sandbox On/Off for the active worktree",
+        "tooltip": "OpenShell Sandboxing: Off (Host Mode). Click to toggle Sandbox On/Off for the active worktree.",
         "command": "openshell.inspectPolicies"
       }
     ]
