@@ -17,7 +17,7 @@ const buildResult = await Bun.build({
 })
 
 if (!buildResult.success || buildResult.outputs.length === 0) {
-  console.error('Failed to bundle OpenShell Policies panel:', buildResult.logs)
+  console.error('Failed to bundle OpenShell Sandbox panel:', buildResult.logs)
   process.exit(1)
 }
 
@@ -28,7 +28,7 @@ const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OpenShell Policies &amp; CLI Commands</title>
+<title>OpenShell Sandbox &amp; Egress</title>
 <style>
 ${css}
 </style>

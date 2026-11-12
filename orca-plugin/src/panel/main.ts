@@ -6,7 +6,6 @@ import type {
 } from '../types.ts'
 import { panelState, type PanelTab } from './state.ts'
 import { copyText, endpointsSignature, escapeHtml, sandboxesSignature } from './utils.ts'
-import { renderCliTab } from './views/cli-tab.ts'
 import { renderEgressTab } from './views/egress-tab.ts'
 import { renderSystemTab } from './views/system-tab.ts'
 
@@ -99,11 +98,6 @@ function renderHeader(): void {
         : 'neutral')
   }
 
-  const agentRules = report.allCliRules.filter(r =>
-    r.compatibleAgents.includes(report.currentAgent)
-  )
-  const cliCount = document.getElementById('cliCount')
-  if (cliCount) cliCount.textContent = String(agentRules.length)
   const egressCountEl = document.getElementById('egressCount')
   if (egressCountEl) {
     egressCountEl.textContent = String(agentObj?.endpoints?.length || 0)
@@ -349,8 +343,7 @@ function renderActiveTab(): void {
   const container = document.getElementById('tabContent')
   if (!container) return
 
-  if (panelState.activeTab === 'cli') container.innerHTML = renderCliTab()
-  else if (panelState.activeTab === 'egress') container.innerHTML = renderEgressTab()
+  if (panelState.activeTab === 'egress') container.innerHTML = renderEgressTab()
   else container.innerHTML = renderSystemTab()
 
   const defaultSandboxModeSelect = document.getElementById(
@@ -673,7 +666,7 @@ function bootstrapPanel(): void {
     } else if (target.classList.contains('tab')) {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'))
       target.classList.add('active')
-      panelState.activeTab = (target.dataset.tab || 'cli') as PanelTab
+      panelState.activeTab = (target.dataset.tab || 'egress') as PanelTab
       renderActiveTab()
     }
   })

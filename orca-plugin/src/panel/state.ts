@@ -4,13 +4,13 @@ import type {
   SandboxDoctorReport,
 } from '../types.ts'
 
-export type PanelTab = 'cli' | 'egress' | 'system'
+export type PanelTab = 'egress' | 'system'
 
 export const panelState = {
   currentReport: null as PolicyInspectionReport | null,
   doctorReport: null as SandboxDoctorReport | null,
   runningDoctor: false,
-  activeTab: 'cli' as PanelTab,
+  activeTab: 'egress' as PanelTab,
   searchFilter: '',
   actionFilter: 'all',
   egressSearch: '',

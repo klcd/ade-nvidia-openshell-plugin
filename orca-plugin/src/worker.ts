@@ -108,21 +108,21 @@ export default function activate(orca: OrcaWorkerApi): void {
       const currentSb = report.activeSandboxes[0] || null
       const isPaused = Boolean(currentSb && /stopped/i.test(currentSb.phase || ''))
       const isRunning = Boolean(currentSb && !isPaused)
-      const allowCount = report.allCliRules.filter(r => r.action === 'allow').length
+      const egressCount = report.agents[0]?.endpoints?.length || 0
       const enabled = report.sandboxEnabled !== false
       const text = !enabled
         ? 'OpenShell: Off (Host Mode)'
         : isRunning
-          ? `OpenShell (${report.currentAgent}): ${currentSb!.name} (${allowCount} CLI rules)`
+          ? `OpenShell (${report.currentAgent}): ${currentSb!.name}`
           : isPaused
-            ? `OpenShell (${report.currentAgent}): ${currentSb!.name} paused (${allowCount} CLI rules)`
+            ? `OpenShell (${report.currentAgent}): ${currentSb!.name} (Paused)`
             : `OpenShell (${report.currentAgent}): On (Enforced)`
       const tone = !enabled ? 'warning' : isRunning ? 'accent' : 'success'
       const tooltip = !enabled
         ? `Project: ${report.selectedWorkspace.name} — Sandboxing is Off (Host Mode). Click to enable OpenShell Sandbox for this worktree.`
         : currentSb
-          ? `Project: ${report.selectedWorkspace.name} — Current tab sandbox: ${currentSb.name} (${isPaused ? 'Paused' : currentSb.phase}). Click to switch worktree to Host Mode (Off).`
-          : `Project: ${report.selectedWorkspace.name} — Sandboxing is On (Enforced, ${allowCount} CLI rules). Click to switch worktree to Host Mode (Off).`
+          ? `Project: ${report.selectedWorkspace.name} — Current tab sandbox: ${currentSb.name} (${isPaused ? 'Paused' : currentSb.phase}, ${egressCount} egress hosts). Click to switch worktree to Host Mode (Off).`
+          : `Project: ${report.selectedWorkspace.name} — Sandboxing is On (Enforced, ${egressCount} egress hosts). Click to switch worktree to Host Mode (Off).`
       void orca.host.call('statusBar.update', {
         id: 'openshell-status',
         text,
