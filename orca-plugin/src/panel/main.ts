@@ -150,7 +150,7 @@ async function applyL7PolicyRule(
       renderHeader()
       renderActiveTab()
       const cmd = getInputValue('cmdInput').trim()
-      if (cmd) await runCommandCheck(cmd)
+      if (cmd) await runCommandCheck(cmd, true)
     }
   } catch (err: any) {
     if (statusEl) {
@@ -159,17 +159,37 @@ async function applyL7PolicyRule(
   }
 }
 
-async function runCommandCheck(command: string): Promise<void> {
+async function runCommandCheck(
+  command: string,
+  execute = false,
+  forceExecute = false
+): Promise<void> {
   const report = panelState.currentReport
-  if (!command || !report) return
+  const trimmed = command.trim()
+  if (!trimmed || !report) return
   const box = document.getElementById('evalOutput')
   if (!box) return
 
+  const testBtn = document.getElementById('testBtn') as HTMLButtonElement | null
+  const runCmdBtn = document.getElementById('runCmdBtn') as HTMLButtonElement | null
+  if (execute) {
+    box.style.display = 'flex'
+    const targetLabel =
+      report.sandboxEnabled !== false
+        ? `OpenShell Sandbox (${report.activeSandboxes?.[0]?.name || report.selectedWorkspace.name})`
+        : `Host (${report.selectedWorkspace.name})`
+    box.innerHTML = `<div style="display:flex;align-items:center;gap:8px;"><span class="badge neutral">Running...</span><span class="sub">Executing <code class="mono">${escapeHtml(trimmed)}</code> in ${escapeHtml(targetLabel)}...</span></div>`
+    if (testBtn) testBtn.disabled = true
+    if (runCmdBtn) runCmdBtn.disabled = true
+  }
+
   try {
     const res = (await window.orca.plugin.request('evaluateCommand', {
-      command,
+      command: trimmed,
       workspacePath: report.selectedWorkspace.path,
       agent: report.currentAgent,
+      execute,
+      forceExecute,
     })) as CommandEvaluationResult
     panelState.lastL7Suggestion = res.l7Suggestion || null
     box.style.display = 'flex'
@@ -204,6 +224,42 @@ async function runCommandCheck(command: string): Promise<void> {
           <div id="quickL7Status" style="display:none;" class="eval-result"></div>
         </div>`
       : ''
+
+    let execHtml = ''
+    if (res.execution) {
+      if (!res.execution.executed) {
+        execHtml = `<div style="margin-top:4px;padding-top:6px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <span class="sub">${escapeHtml(res.execution.skippedReason || 'Execution skipped.')}</span>
+          <button class="copy-btn force-run-cmd-btn" data-cmd="${escapeHtml(res.command)}">Run Anyway</button>
+        </div>`
+      } else {
+        const outParts = [res.execution.stdout.trimEnd(), res.execution.stderr.trimEnd()].filter(
+          Boolean
+        )
+        const combinedOutput = outParts.join('\n')
+        const exitBadgeClass = res.execution.exitCode === 0 ? 'allow' : 'deny'
+        const targetText =
+          res.execution.target === 'sandbox'
+            ? `Sandbox${res.execution.sandboxName ? `: ${res.execution.sandboxName}` : ''}`
+            : `Host: ${report.selectedWorkspace.name}`
+        const copyBtnHtml = combinedOutput
+          ? `<button class="copy-btn" data-copy="${escapeHtml(combinedOutput)}">Copy Output</button>`
+          : ''
+        execHtml = `<div style="margin-top:4px;padding-top:6px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:6px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <strong style="font-size:11px;color:var(--fg);">Output</strong>
+              <span class="badge neutral" title="Working directory: ${escapeHtml(res.execution.cwd)}">${escapeHtml(targetText)}</span>
+              <span class="badge ${exitBadgeClass}">Exit ${escapeHtml(String(res.execution.exitCode ?? 0))}</span>
+              <span class="sub">${escapeHtml(String(res.execution.durationMs))}ms</span>
+            </div>
+            ${copyBtnHtml}
+          </div>
+          <pre class="mono cmd-output-pre">${escapeHtml(combinedOutput || '(no output)')}</pre>
+        </div>`
+      }
+    }
+
     box.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:7px;min-width:0;">
@@ -216,10 +272,14 @@ async function runCommandCheck(command: string): Promise<void> {
       ${rulesHtml}
       ${checksHtml}
       ${l7ActionHtml}
+      ${execHtml}
     `
   } catch (err: any) {
     box.style.display = 'flex'
     box.innerHTML = `<div style="display:flex;align-items:center;gap:6px;"><span class="access-dot deny"></span><div>${escapeHtml(err?.message || err)}</div></div>`
+  } finally {
+    if (testBtn) testBtn.disabled = false
+    if (runCmdBtn) runCmdBtn.disabled = false
   }
 }
 
@@ -602,11 +662,14 @@ function bootstrapPanel(): void {
     } else if (target.classList.contains('quick-l7-btn') && panelState.lastL7Suggestion) {
       const scope = (target.dataset.l7Scope || 'workspace') as 'session' | 'workspace' | 'global'
       void applyL7PolicyRule({ ...panelState.lastL7Suggestion, scope }, 'quickL7Status')
+    } else if (target.classList.contains('force-run-cmd-btn')) {
+      const cmd = target.dataset.cmd || getInputValue('cmdInput')
+      if (cmd) void runCommandCheck(cmd, true, true)
     } else if (target.classList.contains('sample-cmd')) {
       const cmd = target.dataset.cmd || ''
       const cmdInput = document.getElementById('cmdInput') as HTMLInputElement | null
       if (cmdInput) cmdInput.value = cmd
-      void runCommandCheck(cmd)
+      void runCommandCheck(cmd, false)
     } else if (target.classList.contains('tab')) {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'))
       target.classList.add('active')
@@ -622,11 +685,14 @@ function bootstrapPanel(): void {
     void loadReport()
   })
   document.getElementById('testBtn')?.addEventListener('click', () => {
-    void runCommandCheck(getInputValue('cmdInput'))
+    void runCommandCheck(getInputValue('cmdInput'), false)
+  })
+  document.getElementById('runCmdBtn')?.addEventListener('click', () => {
+    void runCommandCheck(getInputValue('cmdInput'), true)
   })
   document.getElementById('cmdInput')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') {
-      void runCommandCheck((e.target as HTMLInputElement).value)
+      void runCommandCheck((e.target as HTMLInputElement).value, true)
     }
   })
 

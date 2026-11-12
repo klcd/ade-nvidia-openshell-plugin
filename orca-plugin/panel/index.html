@@ -233,6 +233,21 @@ button.primary {
   flex-direction: column;
   gap: 6px;
 }
+.cmd-output-pre {
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -493,8 +508,9 @@ details.egress-fold[open] > summary .fold-chevron {
       <span>Test CLI Command</span>
     </div>
     <div class="tester-box">
-      <input id="cmdInput" type="text" class="mono" placeholder="Enter command to test..." />
-      <button id="testBtn" class="primary">Check</button>
+      <input id="cmdInput" type="text" class="mono" placeholder="Enter command to test &amp; run..." />
+      <button id="testBtn" title="Dry-run policy evaluation without executing">Check</button>
+      <button id="runCmdBtn" class="primary" title="Evaluate policy and execute command in active worktree (Sandbox or Host)">Run</button>
     </div>
     <div id="evalOutput" style="display:none;" class="eval-result"></div>
   </div>
@@ -1143,7 +1159,7 @@ details.egress-fold[open] > summary .fold-chevron {
         renderActiveTab();
         const cmd = getInputValue("cmdInput").trim();
         if (cmd)
-          await runCommandCheck(cmd);
+          await runCommandCheck(cmd, true);
       }
     } catch (err) {
       if (statusEl) {
@@ -1151,18 +1167,32 @@ details.egress-fold[open] > summary .fold-chevron {
       }
     }
   }
-  async function runCommandCheck(command) {
+  async function runCommandCheck(command, execute = false, forceExecute = false) {
     const report = panelState.currentReport;
-    if (!command || !report)
+    const trimmed = command.trim();
+    if (!trimmed || !report)
       return;
     const box = document.getElementById("evalOutput");
     if (!box)
       return;
+    const testBtn = document.getElementById("testBtn");
+    const runCmdBtn = document.getElementById("runCmdBtn");
+    if (execute) {
+      box.style.display = "flex";
+      const targetLabel = report.sandboxEnabled !== false ? `OpenShell Sandbox (${report.activeSandboxes?.[0]?.name || report.selectedWorkspace.name})` : `Host (${report.selectedWorkspace.name})`;
+      box.innerHTML = `<div style="display:flex;align-items:center;gap:8px;"><span class="badge neutral">Running...</span><span class="sub">Executing <code class="mono">${escapeHtml(trimmed)}</code> in ${escapeHtml(targetLabel)}...</span></div>`;
+      if (testBtn)
+        testBtn.disabled = true;
+      if (runCmdBtn)
+        runCmdBtn.disabled = true;
+    }
     try {
       const res = await window.orca.plugin.request("evaluateCommand", {
-        command,
+        command: trimmed,
         workspacePath: report.selectedWorkspace.path,
-        agent: report.currentAgent
+        agent: report.currentAgent,
+        execute,
+        forceExecute
       });
       panelState.lastL7Suggestion = res.l7Suggestion || null;
       box.style.display = "flex";
@@ -1190,6 +1220,33 @@ details.egress-fold[open] > summary .fold-chevron {
           </div>
           <div id="quickL7Status" style="display:none;" class="eval-result"></div>
         </div>` : "";
+      let execHtml = "";
+      if (res.execution) {
+        if (!res.execution.executed) {
+          execHtml = `<div style="margin-top:4px;padding-top:6px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <span class="sub">${escapeHtml(res.execution.skippedReason || "Execution skipped.")}</span>
+          <button class="copy-btn force-run-cmd-btn" data-cmd="${escapeHtml(res.command)}">Run Anyway</button>
+        </div>`;
+        } else {
+          const outParts = [res.execution.stdout.trimEnd(), res.execution.stderr.trimEnd()].filter(Boolean);
+          const combinedOutput = outParts.join("\n");
+          const exitBadgeClass = res.execution.exitCode === 0 ? "allow" : "deny";
+          const targetText = res.execution.target === "sandbox" ? `Sandbox${res.execution.sandboxName ? `: ${res.execution.sandboxName}` : ""}` : `Host: ${report.selectedWorkspace.name}`;
+          const copyBtnHtml = combinedOutput ? `<button class="copy-btn" data-copy="${escapeHtml(combinedOutput)}">Copy Output</button>` : "";
+          execHtml = `<div style="margin-top:4px;padding-top:6px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:6px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <strong style="font-size:11px;color:var(--fg);">Output</strong>
+              <span class="badge neutral" title="Working directory: ${escapeHtml(res.execution.cwd)}">${escapeHtml(targetText)}</span>
+              <span class="badge ${exitBadgeClass}">Exit ${escapeHtml(String(res.execution.exitCode ?? 0))}</span>
+              <span class="sub">${escapeHtml(String(res.execution.durationMs))}ms</span>
+            </div>
+            ${copyBtnHtml}
+          </div>
+          <pre class="mono cmd-output-pre">${escapeHtml(combinedOutput || "(no output)")}</pre>
+        </div>`;
+        }
+      }
       box.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:7px;min-width:0;">
@@ -1202,10 +1259,16 @@ details.egress-fold[open] > summary .fold-chevron {
       ${rulesHtml}
       ${checksHtml}
       ${l7ActionHtml}
+      ${execHtml}
     `;
     } catch (err) {
       box.style.display = "flex";
       box.innerHTML = `<div style="display:flex;align-items:center;gap:6px;"><span class="access-dot deny"></span><div>${escapeHtml(err?.message || err)}</div></div>`;
+    } finally {
+      if (testBtn)
+        testBtn.disabled = false;
+      if (runCmdBtn)
+        runCmdBtn.disabled = false;
     }
   }
   async function loadReport() {
@@ -1566,12 +1629,16 @@ details.egress-fold[open] > summary .fold-chevron {
       } else if (target.classList.contains("quick-l7-btn") && panelState.lastL7Suggestion) {
         const scope = target.dataset.l7Scope || "workspace";
         applyL7PolicyRule({ ...panelState.lastL7Suggestion, scope }, "quickL7Status");
+      } else if (target.classList.contains("force-run-cmd-btn")) {
+        const cmd = target.dataset.cmd || getInputValue("cmdInput");
+        if (cmd)
+          runCommandCheck(cmd, true, true);
       } else if (target.classList.contains("sample-cmd")) {
         const cmd = target.dataset.cmd || "";
         const cmdInput = document.getElementById("cmdInput");
         if (cmdInput)
           cmdInput.value = cmd;
-        runCommandCheck(cmd);
+        runCommandCheck(cmd, false);
       } else if (target.classList.contains("tab")) {
         document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
         target.classList.add("active");
@@ -1586,11 +1653,14 @@ details.egress-fold[open] > summary .fold-chevron {
       loadReport();
     });
     document.getElementById("testBtn")?.addEventListener("click", () => {
-      runCommandCheck(getInputValue("cmdInput"));
+      runCommandCheck(getInputValue("cmdInput"), false);
+    });
+    document.getElementById("runCmdBtn")?.addEventListener("click", () => {
+      runCommandCheck(getInputValue("cmdInput"), true);
     });
     document.getElementById("cmdInput")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
-        runCommandCheck(e.target.value);
+        runCommandCheck(e.target.value, true);
       }
     });
     window.orca?.plugin?.on?.("reportUpdated", (payload) => {

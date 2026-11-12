@@ -48,8 +48,9 @@
       <span>Test CLI Command</span>
     </div>
     <div class="tester-box">
-      <input id="cmdInput" type="text" class="mono" placeholder="Enter command to test..." />
-      <button id="testBtn" class="primary">Check</button>
+      <input id="cmdInput" type="text" class="mono" placeholder="Enter command to test &amp; run..." />
+      <button id="testBtn" title="Dry-run policy evaluation without executing">Check</button>
+      <button id="runCmdBtn" class="primary" title="Evaluate policy and execute command in active worktree (Sandbox or Host)">Run</button>
     </div>
     <div id="evalOutput" style="display:none;" class="eval-result"></div>
   </div>

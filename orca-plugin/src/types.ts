@@ -230,6 +230,18 @@ export interface L7PolicySuggestion {
   triggerCommand?: string
 }
 
+export interface CommandExecutionOutput {
+  executed: boolean
+  target: 'sandbox' | 'host'
+  sandboxName?: string | null
+  cwd: string
+  exitCode: number | null
+  stdout: string
+  stderr: string
+  durationMs: number
+  skippedReason?: string
+}
+
 export interface CommandEvaluationResult {
   command: string
   verdict: 'allow' | 'deny' | 'ask'
@@ -241,6 +253,7 @@ export interface CommandEvaluationResult {
     detail: string
   }>
   l7Suggestion?: L7PolicySuggestion
+  execution?: CommandExecutionOutput
 }
 
 export interface AddL7PolicyRequest {

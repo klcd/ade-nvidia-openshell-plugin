@@ -226,6 +226,21 @@ button.primary {
   flex-direction: column;
   gap: 6px;
 }
+.cmd-output-pre {
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

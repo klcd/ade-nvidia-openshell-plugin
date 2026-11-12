@@ -8,8 +8,10 @@ import {
   type AddL7PolicyRequest,
   buildPolicyReport,
   buildPolicyReportAsync,
+  detectRuntimeL7Block,
   discoverCurrentOrcaContext,
   evaluateCommandPolicy,
+  executeTestCliCommand,
   getSandboxMode,
   listActiveSandboxes,
   pauseActiveSandbox,
@@ -340,13 +342,46 @@ export default function activate(orca: OrcaWorkerApi): void {
   })
 
   orca.panels?.handle('evaluateCommand', async (input) => {
-    const req = (input && typeof input === 'object' ? input : {}) as { command?: string; workspacePath?: string; agent?: string }
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      command?: string
+      workspacePath?: string
+      agent?: string
+      execute?: boolean
+      forceExecute?: boolean
+    }
+    const command = String(req.command || '')
     const report = await buildPolicyReportAsync({
       workspacePath: req.workspacePath,
       agent: req.agent,
       fallbackAgent: lastAgent,
     })
-    return toStrictJson(evaluateCommandPolicy(String(req.command || ''), report))
+    const evalResult = evaluateCommandPolicy(command, report)
+    if (req.execute && command.trim()) {
+      if (evalResult.verdict === 'deny' && report.sandboxEnabled === false && !req.forceExecute) {
+        evalResult.execution = {
+          executed: false,
+          target: 'host',
+          sandboxName: null,
+          cwd: report.selectedWorkspace.path,
+          exitCode: null,
+          stdout: '',
+          stderr: '',
+          durationMs: 0,
+          skippedReason: 'Blocked by DENY policy in Host Mode.',
+        }
+      } else {
+        const execution = await executeTestCliCommand(command, report)
+        evalResult.execution = execution
+        const runtimeL7 = detectRuntimeL7Block(command, execution.stdout, execution.stderr)
+        if (runtimeL7 && !evalResult.l7Suggestion) {
+          evalResult.l7Suggestion = runtimeL7
+          evalResult.verdict = 'deny'
+          evalResult.summary = `Network egress to ${runtimeL7.host}:${runtimeL7.port} was blocked at runtime by the OpenShell L7 proxy.`
+        }
+        refreshStatusBar()
+      }
+    }
+    return toStrictJson(evalResult)
   })
 
   orca.panels?.handle('addL7Policy', (input) => {

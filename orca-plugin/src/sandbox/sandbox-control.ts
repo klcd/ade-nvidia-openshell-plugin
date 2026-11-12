@@ -1,10 +1,13 @@
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
   inferSandboxAgent,
   type ActiveSandboxInfo,
+  type CommandExecutionOutput,
+  type L7PolicySuggestion,
+  type PolicyInspectionReport,
   type SandboxDoctorCheck,
   type SandboxDoctorReport,
 } from '../types.ts'
@@ -392,5 +395,253 @@ export async function runSandboxDoctor(homeDir = os.homedir()): Promise<SandboxD
     ok: checks.every(c => c.status !== 'fail'),
     checkedAt: new Date().toISOString(),
     checks,
+  }
+}
+
+function shellQuoteSingle(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+function resolveRealHostShell(homeDir = os.homedir()): string {
+  const user = process.env.USER || path.basename(homeDir) || 'cedric'
+  for (const candidate of [
+    `/etc/profiles/per-user/${user}/bin/zsh`,
+    '/run/current-system/sw/bin/zsh',
+    '/bin/zsh',
+    '/bin/bash',
+  ]) {
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return '/bin/sh'
+}
+
+function runSpawnCaptured(
+  cmd: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return new Promise(resolve => {
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    let settled = false
+    const finish = (exitCode: number, extraStderr = '') => {
+      if (settled) return
+      settled = true
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8')
+      const stderr = Buffer.concat(stderrChunks).toString('utf8') + extraStderr
+      resolve({ exitCode, stdout, stderr })
+    }
+
+    const child = spawn(cmd, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGTERM')
+      } catch {}
+      finish(124, `\nCommand timed out after ${Math.round(options.timeoutMs / 1000)}s.`)
+    }, options.timeoutMs)
+
+    child.stdout.on('data', (chunk: Buffer) => stdoutChunks.push(Buffer.from(chunk)))
+    child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(Buffer.from(chunk)))
+    child.on('close', (code, signal) => {
+      clearTimeout(timer)
+      finish(code ?? (signal ? 128 + (os.constants.signals[signal] ?? 1) : 0))
+    })
+    child.on('error', err => {
+      clearTimeout(timer)
+      finish(1, String(err?.message || err))
+    })
+  })
+}
+
+export function detectRuntimeL7Block(
+  commandLine: string,
+  stdoutText: string,
+  stderrText: string
+): L7PolicySuggestion | null {
+  const combined = `${stdoutText}\n${stderrText}`
+  if (!combined.includes('X-OpenShell-Policy:') && !combined.includes('"error":"policy_denied"')) {
+    return null
+  }
+  const jsonMatch = /\{"binary":[^\n]*?"rule_missing":\{[^\n]*?\}\}/.exec(combined)
+  if (!jsonMatch) return null
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as {
+      binary?: string
+      host?: string
+      method?: string
+      path?: string
+      port?: number
+      rule_missing?: {
+        binary?: string
+        host?: string
+        method?: string
+        path?: string
+        port?: number
+      }
+    }
+    const rm = parsed.rule_missing || parsed
+    if (!rm.host) return null
+    const host = String(rm.host)
+    return {
+      ruleName: `allow-${host.replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase()}`,
+      host,
+      port: Number(rm.port || 443),
+      action: 'allow',
+      method: String(rm.method || 'GET').toUpperCase(),
+      path: String(rm.path || '/**'),
+      binary: String(rm.binary || '*'),
+      triggerCommand: commandLine.trim(),
+    }
+  } catch {
+    return null
+  }
+}
+
+export async function executeTestCliCommand(
+  command: string,
+  report: PolicyInspectionReport,
+  options?: { timeoutMs?: number; homeDir?: string }
+): Promise<CommandExecutionOutput> {
+  const trimmed = command.trim()
+  const homeDir = options?.homeDir || os.homedir()
+  const timeoutMs = options?.timeoutMs ?? 20000
+  const workspacePath =
+    report.selectedWorkspace?.path && fs.existsSync(report.selectedWorkspace.path)
+      ? report.selectedWorkspace.path
+      : homeDir
+  const projectName = path.basename(workspacePath)
+  const startTime = Date.now()
+  const baseEnv: NodeJS.ProcessEnv = {
+    ...getAugmentedEnv(homeDir),
+    AG_SANDBOX_HOST_INTERNAL: '1',
+    ORCA_OPENSHELL_DISABLE_POPUP: '1',
+    PAGER: 'cat',
+    GIT_PAGER: 'cat',
+    TERM: 'dumb',
+  }
+  delete baseEnv.ANTIGRAVITY_HARNESS_PATH
+
+  // 1. Host Mode execution when sandboxing is Off for this worktree
+  if (report.sandboxEnabled === false) {
+    const shellBin = resolveRealHostShell(homeDir)
+    const res = await runSpawnCaptured(shellBin, ['-c', trimmed], {
+      cwd: workspacePath,
+      env: baseEnv,
+      timeoutMs,
+    })
+    return {
+      executed: true,
+      target: 'host',
+      sandboxName: null,
+      cwd: workspacePath,
+      exitCode: res.exitCode,
+      stdout: res.stdout,
+      stderr: res.stderr,
+      durationMs: Date.now() - startTime,
+    }
+  }
+
+  // 2. Sandbox Mode execution: prefer active tab sandbox or workspace-registered sandbox
+  await refreshActiveSandboxesCache(true)
+  const liveSandboxes = listActiveSandboxes()
+  const registryMap = readSandboxRegistryMap(homeDir)
+  let targetSb: ActiveSandboxInfo | undefined = report.activeSandboxes?.[0]
+    ? liveSandboxes.find(s => s.name === report.activeSandboxes[0].name) || report.activeSandboxes[0]
+    : undefined
+
+  if (!targetSb) {
+    for (const sb of liveSandboxes) {
+      const reg = registryMap.get(sb.name)
+      if (reg && reg.workspacePath === workspacePath) {
+        targetSb = sb
+        break
+      }
+    }
+  }
+
+  const openshellBin = resolveOpenShellBinary(homeDir)
+  if (targetSb) {
+    if (/stopped/i.test(targetSb.phase || '')) {
+      await resumeActiveSandbox(targetSb.name)
+    }
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `openshell-testcmd-${targetSb.name}-`))
+    const sshConfigPath = path.join(tmpDir, 'ssh_config')
+    try {
+      const sshConfigRaw = execFileSync(openshellBin, ['sandbox', 'ssh-config', targetSb.name], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 8000,
+        env: baseEnv,
+      })
+      fs.writeFileSync(sshConfigPath, sshConfigRaw, { mode: 0o600 })
+      const hostMatch = sshConfigRaw.match(/^\s*Host\s+(\S+)/m)
+      const sshHost = hostMatch ? hostMatch[1] : `openshell-${targetSb.name}`
+      const containerCwd = `/sandbox/${projectName}`
+      const remoteScript = [
+        `cd ${shellQuoteSingle(containerCwd)} 2>/dev/null || cd /sandbox`,
+        `export HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu TERM=dumb PAGER=cat GIT_PAGER=cat`,
+        `export PATH="/sandbox/.orca-delegate/bin:/usr/local/go/bin:/home/ubuntu/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"`,
+        `if command -v zsh >/dev/null 2>&1; then zsh -c ${shellQuoteSingle(trimmed)}; else bash -c ${shellQuoteSingle(trimmed)}; fi`,
+      ].join('\n')
+
+      const res = await runSpawnCaptured(
+        'ssh',
+        ['-T', '-o', 'ConnectTimeout=10', '-F', sshConfigPath, sshHost, remoteScript],
+        { cwd: workspacePath, env: baseEnv, timeoutMs }
+      )
+      return {
+        executed: true,
+        target: 'sandbox',
+        sandboxName: targetSb.name,
+        cwd: containerCwd,
+        exitCode: res.exitCode,
+        stdout: res.stdout,
+        stderr: res.stderr,
+        durationMs: Date.now() - startTime,
+      }
+    } catch {
+      // Fall through to agent-box agy-chat-exec if direct SSH failed
+    } finally {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true })
+      } catch {}
+    }
+  }
+
+  // 3. Provision or reuse worktree sandbox via agent-box agy-chat-exec
+  const binDir = process.env.ORCA_OPENSHELL_BRIDGE_BIN_DIR || path.join(homeDir, '.local', 'bin')
+  const agentBoxBin = path.join(binDir, 'agent-box')
+  const execBin = fs.existsSync(agentBoxBin) ? agentBoxBin : 'agent-box'
+  const res = await runSpawnCaptured(execBin, ['agy-chat-exec', 'zsh', trimmed], {
+    cwd: workspacePath,
+    env: {
+      ...baseEnv,
+      ORCA_AGENT_SESSION_ID: `panel-tester-${projectName}`,
+    },
+    timeoutMs: Math.max(timeoutMs, 45000),
+  })
+  await refreshActiveSandboxesCache(true)
+  const updatedRegistry = readSandboxRegistryMap(homeDir)
+  let resolvedSbName: string | null = null
+  for (const sb of listActiveSandboxes()) {
+    const reg = updatedRegistry.get(sb.name)
+    if (reg && reg.workspacePath === workspacePath) {
+      resolvedSbName = sb.name
+      break
+    }
+  }
+  return {
+    executed: true,
+    target: 'sandbox',
+    sandboxName: resolvedSbName,
+    cwd: `/sandbox/${projectName}`,
+    exitCode: res.exitCode,
+    stdout: res.stdout,
+    stderr: res.stderr,
+    durationMs: Date.now() - startTime,
   }
 }

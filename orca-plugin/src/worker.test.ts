@@ -278,6 +278,28 @@ test('sandbox mode is off by default, configurable globally, and inherited per-w
     assert.equal(buildPolicyReport({ workspacePath: wtB, agent: 'claude' }).sandboxEnabled, false)
     assert.equal(statusBarUpdates.at(-1)?.text, 'OpenShell: Off (Host Mode)')
 
+    // Test CLI Command execution in Host Mode returns stdout & exitCode, and skips automatic execution on DENY
+    const evaluateCmd = panelHandlers.get('evaluateCommand')!
+    const execRes = await evaluateCmd({
+      command: 'echo "hello-from-tester"',
+      workspacePath: wtB,
+      agent: 'claude',
+      execute: true,
+    })
+    assert.equal(execRes.execution?.executed, true)
+    assert.equal(execRes.execution?.target, 'host')
+    assert.equal(execRes.execution?.exitCode, 0)
+    assert.match(execRes.execution?.stdout || '', /hello-from-tester/)
+
+    const deniedExecRes = await evaluateCmd({
+      command: 'orca orchestration worker-start --token secret',
+      workspacePath: wtB,
+      agent: 'claude',
+      execute: true,
+    })
+    assert.equal(deniedExecRes.verdict, 'deny')
+    assert.equal(deniedExecRes.execution?.executed, false)
+
     // Global default can be configured to ON via setDefaultSandboxMode (reset wtB override first)
     fs.unlinkSync(modeFile)
     const setDefaultMode = panelHandlers.get('setDefaultSandboxMode')!
