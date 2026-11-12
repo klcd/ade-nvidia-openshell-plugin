@@ -696,6 +696,63 @@ function bootstrapPanel(): void {
     }
   })
 
+  const tooltipEl = document.getElementById('orcaTooltip')
+  const positionTooltip = (clientX: number, clientY: number) => {
+    if (!tooltipEl || tooltipEl.style.display === 'none') return
+    const pad = 10
+    const rect = tooltipEl.getBoundingClientRect()
+    let left = clientX + 12
+    let top = clientY + 14
+    if (left + rect.width > window.innerWidth - pad) {
+      left = Math.max(pad, window.innerWidth - rect.width - pad)
+    }
+    if (top + rect.height > window.innerHeight - pad) {
+      top = Math.max(pad, clientY - rect.height - 10)
+    }
+    tooltipEl.style.left = `${left}px`
+    tooltipEl.style.top = `${top}px`
+  }
+
+  document.addEventListener('mouseover', e => {
+    if (!tooltipEl) return
+    const target = e.target
+    if (!(target instanceof HTMLElement)) return
+    const host = target.closest<HTMLElement>('[data-tooltip], [title]')
+    if (!host) {
+      tooltipEl.style.display = 'none'
+      return
+    }
+    if (host.hasAttribute('title')) {
+      const t = host.getAttribute('title') || ''
+      if (t && !host.dataset.tooltip) host.dataset.tooltip = t
+      host.removeAttribute('title')
+    }
+    const text = host.dataset.tooltip?.trim()
+    if (!text) {
+      tooltipEl.style.display = 'none'
+      return
+    }
+    tooltipEl.textContent = text
+    tooltipEl.style.display = 'block'
+    positionTooltip(e.clientX, e.clientY)
+  })
+
+  document.addEventListener('mousemove', e => {
+    positionTooltip(e.clientX, e.clientY)
+  })
+
+  document.addEventListener('mouseout', e => {
+    if (!tooltipEl) return
+    const related = e.relatedTarget
+    if (!(related instanceof HTMLElement) || !related.closest('[data-tooltip], [title]')) {
+      tooltipEl.style.display = 'none'
+    }
+  })
+
+  window.addEventListener('scroll', () => {
+    if (tooltipEl) tooltipEl.style.display = 'none'
+  }, true)
+
   window.orca?.plugin?.on?.('reportUpdated', (payload: any) => {
     if (payload && typeof payload === 'object' && payload.selectedWorkspace) {
       panelState.currentReport = payload as PolicyInspectionReport

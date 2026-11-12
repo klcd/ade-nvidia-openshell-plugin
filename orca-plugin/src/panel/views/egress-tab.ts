@@ -110,7 +110,7 @@ export function renderEgressTab(): string {
       const l7Html = `<div class="chips">${effectiveL7Rules
         .map(
           r =>
-            `<span class="right-pill" title="L7 HTTP Rule (${escapeHtml(policySourceLabel)})"><span class="access-dot ${r.action === 'deny' ? 'deny' : 'rw'}" style="width:6px;height:6px;box-shadow:none;"></span>${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`
+            `<span class="right-pill" data-tooltip="L7 HTTP Rule (${escapeHtml(policySourceLabel)})"><span class="access-dot ${r.action === 'deny' ? 'deny' : 'rw'}" style="width:6px;height:6px;box-shadow:none;"></span>${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`
         )
         .join('')}</div>`
       const cliChipsHtml =
@@ -118,7 +118,7 @@ export function renderEgressTab(): string {
           ? `<div class="chips">${ep.compatibleCliCommands
               .map(
                 cmd =>
-                  `<button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cmd.replace(/<[^>]+>/g, 'test'))}" title="${escapeHtml(`${boxTooltip}\nClick to load into Test CLI Command`)}">${escapeHtml(cmd)}</button>`
+                  `<span class="source-pill" data-tooltip="${escapeHtml(boxTooltip)}">${escapeHtml(cmd)}</span>`
               )
               .join('')}</div>`
           : ''
@@ -132,28 +132,28 @@ export function renderEgressTab(): string {
               data-action="${escapeHtml(firstL7.action || 'allow')}"
               data-method="${escapeHtml(firstL7.method || 'GET')}"
               data-path="${escapeHtml(firstL7.path || '/**')}"
-              title="Promote temporary rule to project rules (.agents/policies/l7-custom.json)"
+              data-tooltip="Promote temporary rule to project rules (.agents/policies/l7-custom.json)"
             >Allow (Add to Project)</button>
             <button
               class="copy-btn remove-temp-btn"
               data-host="${escapeHtml(ep.host)}"
               data-port="${escapeHtml(String(ep.port || 443))}"
-              title="Remove temporary rule tag from session"
+              data-tooltip="Remove temporary rule tag from session"
             >Remove</button>
           </div>`
         : ''
 
       return `
         <details class="egress-fold" data-egress="${escapeHtml(epKey)}" ${isOpen ? 'open' : ''}>
-          <summary title="${escapeHtml(boxTooltip)}">
+          <summary data-tooltip="${escapeHtml(boxTooltip)}">
             <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
               <span class="fold-chevron">&#9654;</span>
-              <span class="access-dot ${dotClass}" title="Right: ${escapeHtml(ep.access)}"></span>
+              <span class="access-dot ${dotClass}"></span>
               <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(ep.host)}${ep.port && ep.port !== 443 ? ':' + escapeHtml(String(ep.port)) : ''}</span>
               ${scopeBadgeHtml}
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              <span class="source-pill" title="${escapeHtml(boxTooltip)}">&#8984; ${escapeHtml(triggerLabel)}</span>
+              <span class="source-pill" data-tooltip="${escapeHtml(boxTooltip)}">&#8984; ${escapeHtml(triggerLabel)}</span>
             </div>
           </summary>
           <div class="egress-fold-body">

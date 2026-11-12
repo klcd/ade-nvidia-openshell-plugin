@@ -248,6 +248,23 @@ button.primary {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.orca-tooltip {
+  position: fixed;
+  z-index: 9999;
+  max-width: min(340px, calc(100vw - 16px));
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.42);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: none;
+}
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -522,6 +539,7 @@ details.egress-fold[open] > summary .fold-chevron {
   </div>
 
   <div id="tabContent"></div>
+  <div id="orcaTooltip" class="orca-tooltip" style="display:none;"></div>
 </div>
 <script>
 (() => {
@@ -611,15 +629,13 @@ details.egress-fold[open] > summary .fold-chevron {
         ];
         const tooltip = tooltipLines.join("\n");
         return `
-            <div class="cmd-row" title="${escapeHtml(tooltip)}">
+            <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
               <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-                <span class="access-dot ${dotClass}" title="${escapeHtml(r.action.toUpperCase())}"></span>
+                <span class="access-dot ${dotClass}"></span>
                 <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.cliCommand)}</span>
               </div>
               <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
-                <span class="source-pill">&#8984; ${escapeHtml(r.groupName)}</span>
-                <button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cleanCmd)}" title="Load into Test CLI Command">Test</button>
-                <button class="copy-btn" data-copy="${escapeHtml(cleanCmd)}" title="Copy command">Copy</button>
+                <span class="source-pill" data-tooltip="${escapeHtml(tooltip)}">&#8984; ${escapeHtml(r.groupName)}</span>
               </div>
             </div>
           `;
@@ -736,8 +752,8 @@ details.egress-fold[open] > summary .fold-chevron {
       ];
       const boxTooltip = boxTooltipLines.join("\n");
       const effectiveL7Rules = ep.l7Rules && ep.l7Rules.length > 0 ? ep.l7Rules : [{ action: "allow", method: "*", path: "/**" }];
-      const l7Html = `<div class="chips">${effectiveL7Rules.map((r) => `<span class="right-pill" title="L7 HTTP Rule (${escapeHtml(policySourceLabel)})"><span class="access-dot ${r.action === "deny" ? "deny" : "rw"}" style="width:6px;height:6px;box-shadow:none;"></span>${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`).join("")}</div>`;
-      const cliChipsHtml = (ep.compatibleCliCommands || []).length > 0 ? `<div class="chips">${ep.compatibleCliCommands.map((cmd) => `<button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cmd.replace(/<[^>]+>/g, "test"))}" title="${escapeHtml(`${boxTooltip}\nClick to load into Test CLI Command`)}">${escapeHtml(cmd)}</button>`).join("")}</div>` : "";
+      const l7Html = `<div class="chips">${effectiveL7Rules.map((r) => `<span class="right-pill" data-tooltip="L7 HTTP Rule (${escapeHtml(policySourceLabel)})"><span class="access-dot ${r.action === "deny" ? "deny" : "rw"}" style="width:6px;height:6px;box-shadow:none;"></span>${escapeHtml(r.action.toUpperCase())} ${escapeHtml(r.method)} ${escapeHtml(r.path)}</span>`).join("")}</div>`;
+      const cliChipsHtml = (ep.compatibleCliCommands || []).length > 0 ? `<div class="chips">${ep.compatibleCliCommands.map((cmd) => `<span class="source-pill" data-tooltip="${escapeHtml(boxTooltip)}">${escapeHtml(cmd)}</span>`).join("")}</div>` : "";
       const firstL7 = effectiveL7Rules[0];
       const tempActionsHtml = isTemporary ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;">
             <button
@@ -747,26 +763,26 @@ details.egress-fold[open] > summary .fold-chevron {
               data-action="${escapeHtml(firstL7.action || "allow")}"
               data-method="${escapeHtml(firstL7.method || "GET")}"
               data-path="${escapeHtml(firstL7.path || "/**")}"
-              title="Promote temporary rule to project rules (.agents/policies/l7-custom.json)"
+              data-tooltip="Promote temporary rule to project rules (.agents/policies/l7-custom.json)"
             >Allow (Add to Project)</button>
             <button
               class="copy-btn remove-temp-btn"
               data-host="${escapeHtml(ep.host)}"
               data-port="${escapeHtml(String(ep.port || 443))}"
-              title="Remove temporary rule tag from session"
+              data-tooltip="Remove temporary rule tag from session"
             >Remove</button>
           </div>` : "";
       return `
         <details class="egress-fold" data-egress="${escapeHtml(epKey)}" ${isOpen ? "open" : ""}>
-          <summary title="${escapeHtml(boxTooltip)}">
+          <summary data-tooltip="${escapeHtml(boxTooltip)}">
             <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
               <span class="fold-chevron">&#9654;</span>
-              <span class="access-dot ${dotClass}" title="Right: ${escapeHtml(ep.access)}"></span>
+              <span class="access-dot ${dotClass}"></span>
               <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(ep.host)}${ep.port && ep.port !== 443 ? ":" + escapeHtml(String(ep.port)) : ""}</span>
               ${scopeBadgeHtml}
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              <span class="source-pill" title="${escapeHtml(boxTooltip)}">&#8984; ${escapeHtml(triggerLabel)}</span>
+              <span class="source-pill" data-tooltip="${escapeHtml(boxTooltip)}">&#8984; ${escapeHtml(triggerLabel)}</span>
             </div>
           </summary>
           <div class="egress-fold-body">
@@ -838,13 +854,13 @@ details.egress-fold[open] > summary .fold-chevron {
       const info = describeMountPath(item.path, item.access, wsName, a.agent);
       const tooltip = `Landlock (${item.access}) \u2022 ${info.sourceFile}\n${info.explanation}`;
       return `
-        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+        <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-            <span class="access-dot ${item.dot}" title="Landlock: ${escapeHtml(item.access)}"></span>
+            <span class="access-dot ${item.dot}"></span>
             <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.path)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-            <span class="source-pill">&#8984; ${escapeHtml(info.source)}</span>
+            <span class="source-pill" data-tooltip="${escapeHtml(tooltip)}">&#8984; ${escapeHtml(info.source)}</span>
           </div>
         </div>
       `;
@@ -852,13 +868,13 @@ details.egress-fold[open] > summary .fold-chevron {
     const envCardsHtml = a.credentialPlaceholders.map((envKey) => {
       const tooltip = `openshell:resolve \u2022 ${a.providerProfile}.profile.yaml\nProxy-injected credential placeholder (never readable in plain text inside the sandbox).`;
       return `
-        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+        <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-            <span class="access-dot l7" title="Supervisor-resolved credential placeholder"></span>
+            <span class="access-dot l7"></span>
             <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(envKey)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-            <span class="source-pill">&#8984; openshell:resolve</span>
+            <span class="source-pill" data-tooltip="${escapeHtml(tooltip)}">&#8984; openshell:resolve</span>
           </div>
         </div>
       `;
@@ -867,13 +883,13 @@ details.egress-fold[open] > summary .fold-chevron {
       const baseName = binPath.split("/").pop() || binPath;
       const tooltip = `Executable container binary inside ${a.containerImage} (${a.hostWrapper})`;
       return `
-        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+        <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-            <span class="access-dot ro" title="Executable container binary"></span>
+            <span class="access-dot ro"></span>
             <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(binPath)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-            <span class="source-pill">&#8984; ${escapeHtml(baseName)}</span>
+            <span class="source-pill" data-tooltip="${escapeHtml(tooltip)}">&#8984; ${escapeHtml(baseName)}</span>
           </div>
         </div>
       `;
@@ -1623,6 +1639,64 @@ details.egress-fold[open] > summary .fold-chevron {
         runCommandCheck(e.target.value, true);
       }
     });
+    const tooltipEl = document.getElementById("orcaTooltip");
+    const positionTooltip = (clientX, clientY) => {
+      if (!tooltipEl || tooltipEl.style.display === "none")
+        return;
+      const pad = 10;
+      const rect = tooltipEl.getBoundingClientRect();
+      let left = clientX + 12;
+      let top = clientY + 14;
+      if (left + rect.width > window.innerWidth - pad) {
+        left = Math.max(pad, window.innerWidth - rect.width - pad);
+      }
+      if (top + rect.height > window.innerHeight - pad) {
+        top = Math.max(pad, clientY - rect.height - 10);
+      }
+      tooltipEl.style.left = `${left}px`;
+      tooltipEl.style.top = `${top}px`;
+    };
+    document.addEventListener("mouseover", (e) => {
+      if (!tooltipEl)
+        return;
+      const target = e.target;
+      if (!(target instanceof HTMLElement))
+        return;
+      const host = target.closest("[data-tooltip], [title]");
+      if (!host) {
+        tooltipEl.style.display = "none";
+        return;
+      }
+      if (host.hasAttribute("title")) {
+        const t = host.getAttribute("title") || "";
+        if (t && !host.dataset.tooltip)
+          host.dataset.tooltip = t;
+        host.removeAttribute("title");
+      }
+      const text = host.dataset.tooltip?.trim();
+      if (!text) {
+        tooltipEl.style.display = "none";
+        return;
+      }
+      tooltipEl.textContent = text;
+      tooltipEl.style.display = "block";
+      positionTooltip(e.clientX, e.clientY);
+    });
+    document.addEventListener("mousemove", (e) => {
+      positionTooltip(e.clientX, e.clientY);
+    });
+    document.addEventListener("mouseout", (e) => {
+      if (!tooltipEl)
+        return;
+      const related = e.relatedTarget;
+      if (!(related instanceof HTMLElement) || !related.closest("[data-tooltip], [title]")) {
+        tooltipEl.style.display = "none";
+      }
+    });
+    window.addEventListener("scroll", () => {
+      if (tooltipEl)
+        tooltipEl.style.display = "none";
+    }, true);
     window.orca?.plugin?.on?.("reportUpdated", (payload) => {
       if (payload && typeof payload === "object" && payload.selectedWorkspace) {
         panelState.currentReport = payload;

@@ -58,13 +58,13 @@ export function renderSystemTab(): string {
       const info = describeMountPath(item.path, item.access, wsName, a.agent)
       const tooltip = `Landlock (${item.access}) • ${info.sourceFile}\n${info.explanation}`
       return `
-        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+        <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-            <span class="access-dot ${item.dot}" title="Landlock: ${escapeHtml(item.access)}"></span>
+            <span class="access-dot ${item.dot}"></span>
             <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.path)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-            <span class="source-pill">&#8984; ${escapeHtml(info.source)}</span>
+            <span class="source-pill" data-tooltip="${escapeHtml(tooltip)}">&#8984; ${escapeHtml(info.source)}</span>
           </div>
         </div>
       `
@@ -75,13 +75,13 @@ export function renderSystemTab(): string {
     .map(envKey => {
       const tooltip = `openshell:resolve • ${a.providerProfile}.profile.yaml\nProxy-injected credential placeholder (never readable in plain text inside the sandbox).`
       return `
-        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+        <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-            <span class="access-dot l7" title="Supervisor-resolved credential placeholder"></span>
+            <span class="access-dot l7"></span>
             <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(envKey)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-            <span class="source-pill">&#8984; openshell:resolve</span>
+            <span class="source-pill" data-tooltip="${escapeHtml(tooltip)}">&#8984; openshell:resolve</span>
           </div>
         </div>
       `
@@ -93,13 +93,13 @@ export function renderSystemTab(): string {
       const baseName = binPath.split('/').pop() || binPath
       const tooltip = `Executable container binary inside ${a.containerImage} (${a.hostWrapper})`
       return `
-        <div class="cmd-row" title="${escapeHtml(tooltip)}">
+        <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-            <span class="access-dot ro" title="Executable container binary"></span>
+            <span class="access-dot ro"></span>
             <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(binPath)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-            <span class="source-pill">&#8984; ${escapeHtml(baseName)}</span>
+            <span class="source-pill" data-tooltip="${escapeHtml(tooltip)}">&#8984; ${escapeHtml(baseName)}</span>
           </div>
         </div>
       `

@@ -59,15 +59,13 @@ export function renderCliTab(): string {
           const tooltip = tooltipLines.join('\n')
 
           return `
-            <div class="cmd-row" title="${escapeHtml(tooltip)}">
+            <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
               <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-                <span class="access-dot ${dotClass}" title="${escapeHtml(r.action.toUpperCase())}"></span>
+                <span class="access-dot ${dotClass}"></span>
                 <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.cliCommand)}</span>
               </div>
               <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
-                <span class="source-pill">&#8984; ${escapeHtml(r.groupName)}</span>
-                <button class="copy-btn sample-cmd" data-cmd="${escapeHtml(cleanCmd)}" title="Load into Test CLI Command">Test</button>
-                <button class="copy-btn" data-copy="${escapeHtml(cleanCmd)}" title="Copy command">Copy</button>
+                <span class="source-pill" data-tooltip="${escapeHtml(tooltip)}">&#8984; ${escapeHtml(r.groupName)}</span>
               </div>
             </div>
           `

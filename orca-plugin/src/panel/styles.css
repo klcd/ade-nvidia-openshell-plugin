@@ -241,6 +241,23 @@ button.primary {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.orca-tooltip {
+  position: fixed;
+  z-index: 9999;
+  max-width: min(340px, calc(100vw - 16px));
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.42);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: none;
+}
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
