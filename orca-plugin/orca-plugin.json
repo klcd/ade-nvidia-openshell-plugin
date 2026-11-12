@@ -7,6 +7,8 @@
   "engines": {
     "orca": ">=1.4.248"
   },
+  "repository": "https://github.com/klcd/ade-nvidia-openshell-plugin",
+  "license": "MIT",
   "execution": "trusted-worker",
   "pluginApi": 1,
   "main": "src/worker.ts",
