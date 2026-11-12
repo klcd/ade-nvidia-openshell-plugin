@@ -114,13 +114,13 @@ export default function activate(orca: OrcaWorkerApi): void {
           ? `OpenShell (${report.currentAgent}): ${currentSb!.name} (${allowCount} CLI rules)`
           : isPaused
             ? `OpenShell (${report.currentAgent}): ${currentSb!.name} paused (${allowCount} CLI rules)`
-            : `OpenShell (${report.currentAgent}): Enforced (${allowCount} CLI rules)`
+            : `OpenShell (${report.currentAgent}): On (Enforced)`
       const tone = !enabled ? 'warning' : isRunning ? 'accent' : 'success'
       const tooltip = !enabled
-        ? `Project: ${report.selectedWorkspace.name} - OpenShell sandboxing is deactivated (launches & commands run directly on host)`
+        ? `Project: ${report.selectedWorkspace.name} — Sandboxing is Off (Host Mode). Click to enable OpenShell Sandbox for this worktree.`
         : currentSb
-          ? `Project: ${report.selectedWorkspace.name} - Current tab sandbox: ${currentSb.name} (${isPaused ? 'Paused' : currentSb.phase}) - ${allowCount} allowed CLI command patterns`
-          : `Project: ${report.selectedWorkspace.name} - Agent: ${report.currentAgent} - No sandbox running for current tab yet - ${allowCount} allowed CLI command patterns`
+          ? `Project: ${report.selectedWorkspace.name} — Current tab sandbox: ${currentSb.name} (${isPaused ? 'Paused' : currentSb.phase}). Click to switch worktree to Host Mode (Off).`
+          : `Project: ${report.selectedWorkspace.name} — Sandboxing is On (Enforced, ${allowCount} CLI rules). Click to switch worktree to Host Mode (Off).`
       void orca.host.call('statusBar.update', {
         id: 'openshell-status',
         text,
@@ -129,6 +129,12 @@ export default function activate(orca: OrcaWorkerApi): void {
         tooltip,
         visible: true,
       }).catch(() => {})
+    } catch {}
+  }
+
+  const broadcastReportToPanels = (report: PolicyInspectionReport) => {
+    try {
+      orca.panels?.post?.('reportUpdated', JSON.parse(JSON.stringify(report)))
     } catch {}
   }
 
@@ -222,6 +228,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       fallbackAgent: lastAgent,
     })
     updateStatusBarFromReport(report)
+    broadcastReportToPanels(report)
     return toStrictJson(report)
   })
 
@@ -238,6 +245,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       fallbackAgent: lastAgent,
     })
     updateStatusBarFromReport(report)
+    broadcastReportToPanels(report)
     return toStrictJson(report)
   })
 
@@ -391,10 +399,57 @@ export default function activate(orca: OrcaWorkerApi): void {
     return toStrictJson({ doctor, report })
   })
 
-  orca.commands?.register('openshell.inspectPolicies', async () => {
-    await buildPolicyReportAsync({ fallbackAgent: lastAgent })
-    refreshStatusBar()
-    return formatCliPolicySummary()
+  orca.commands?.register('openshell.inspectPolicies', async (input) => {
+    const req = (input && typeof input === 'object' ? input : {}) as {
+      workspacePath?: string
+      workspaceId?: string
+      agent?: string
+      enabled?: boolean
+      inspectOnly?: boolean
+    }
+    if (!req.workspacePath) {
+      await refreshOrcaContextCache(undefined, true)
+    }
+    const ctx = discoverCurrentOrcaContext({
+      workspacePath: req.workspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    const targetWorkspacePath =
+      req.workspacePath || resolveWorkspacePathById(req.workspaceId) || ctx.workspace.path
+    const targetWorkspaceId = req.workspaceId || ctx.workspace.id
+
+    if (req.inspectOnly) {
+      const report = await buildPolicyReportAsync({
+        workspacePath: targetWorkspacePath,
+        agent: req.agent,
+        fallbackAgent: lastAgent,
+      })
+      updateStatusBarFromReport(report)
+      return formatCliPolicySummary(targetWorkspacePath)
+    }
+
+    const currentMode = getSandboxMode({
+      workspacePath: targetWorkspacePath,
+      workspaceId: targetWorkspaceId,
+    })
+    const nextEnabled = typeof req.enabled === 'boolean' ? req.enabled : !currentMode.enabled
+    setSandboxMode(nextEnabled, {
+      workspacePath: targetWorkspacePath,
+      workspaceId: targetWorkspaceId,
+    })
+
+    const report = await buildPolicyReportAsync({
+      workspacePath: targetWorkspacePath,
+      agent: req.agent,
+      fallbackAgent: lastAgent,
+    })
+    updateStatusBarFromReport(report)
+    broadcastReportToPanels(report)
+
+    const modeLabel = report.sandboxEnabled ? 'On (Enforced)' : 'Off (Host Mode)'
+    orca.log?.(`Toggled OpenShell sandbox mode for ${report.selectedWorkspace.name} (${targetWorkspacePath}) -> ${modeLabel}`)
+    return `OpenShell Sandbox for ${report.selectedWorkspace.name}: ${modeLabel}`
   })
 
   ;(orca as any).events?.on?.('workspace.changed', () => {

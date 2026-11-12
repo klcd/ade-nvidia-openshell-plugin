@@ -630,6 +630,14 @@ function bootstrapPanel(): void {
     }
   })
 
+  window.orca?.plugin?.on?.('reportUpdated', (payload: any) => {
+    if (payload && typeof payload === 'object' && payload.selectedWorkspace) {
+      panelState.currentReport = payload as PolicyInspectionReport
+      renderHeader()
+      renderActiveTab()
+    }
+  })
+
   window.addEventListener('focus', () => {
     void loadReport()
   })

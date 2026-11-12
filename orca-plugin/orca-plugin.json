@@ -34,7 +34,7 @@
         "text": "OpenShell: Off (Host Mode)",
         "icon": "layers",
         "tone": "warning",
-        "tooltip": "OpenShell Sandbox & CLI Command Policies (click to inspect)",
+        "tooltip": "Click to toggle OpenShell Sandbox On/Off for the active worktree",
         "command": "openshell.inspectPolicies"
       }
     ]

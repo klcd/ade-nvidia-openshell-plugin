@@ -237,21 +237,49 @@ test('sandbox mode is off by default, configurable globally, and inherited per-w
   try {
     let handler: ((event: any, next: (event?: any) => any) => any) | undefined
     const panelHandlers = new Map<string, (input: any) => any>()
+    const commandHandlers = new Map<string, (input?: any) => any>()
+    const statusBarUpdates: any[] = []
     activate({
       hooks: { on: (_name: string, fn: typeof handler) => { handler = fn } },
-      panels: { handle: (name: string, fn: (input: any) => any) => { panelHandlers.set(name, fn) } },
+      panels: {
+        handle: (name: string, fn: (input: any) => any) => { panelHandlers.set(name, fn) },
+        post() {},
+      },
+      commands: {
+        register: (name: string, fn: (input?: any) => any) => { commandHandlers.set(name, fn) },
+      },
+      host: {
+        call: async (method: string, params: any) => {
+          if (method === 'statusBar.update') statusBarUpdates.push(params)
+          return { ok: true }
+        },
+      },
       log() {},
     } as any)
     assert.ok(handler)
     assert.ok(panelHandlers.has('setSandboxMode'))
     assert.ok(panelHandlers.has('setDefaultSandboxMode'))
+    assert.ok(commandHandlers.has('openshell.inspectPolicies'))
 
     // Unconfigured worktrees default to OFF (Host Mode)
     const initialReportB = buildPolicyReport({ workspacePath: wtB, agent: 'claude' })
     assert.equal(initialReportB.defaultSandboxEnabled, false)
     assert.equal(initialReportB.sandboxEnabled, false)
 
-    // Global default can be configured to ON via setDefaultSandboxMode
+    // Clicking the status bar item (openshell.inspectPolicies) toggles the worktree On (Enforced) -> Off (Host Mode)
+    const statusBarToggleCmd = commandHandlers.get('openshell.inspectPolicies')!
+    const toggleOnMsg = await statusBarToggleCmd({ workspacePath: wtB })
+    assert.match(toggleOnMsg, /On \(Enforced\)/)
+    assert.equal(buildPolicyReport({ workspacePath: wtB, agent: 'claude' }).sandboxEnabled, true)
+    assert.match(statusBarUpdates.at(-1)?.text || '', /^OpenShell \([a-z0-9_-]+\): On \(Enforced\)$/i)
+
+    const toggleOffMsg = await statusBarToggleCmd({ workspacePath: wtB })
+    assert.match(toggleOffMsg, /Off \(Host Mode\)/)
+    assert.equal(buildPolicyReport({ workspacePath: wtB, agent: 'claude' }).sandboxEnabled, false)
+    assert.equal(statusBarUpdates.at(-1)?.text, 'OpenShell: Off (Host Mode)')
+
+    // Global default can be configured to ON via setDefaultSandboxMode (reset wtB override first)
+    fs.unlinkSync(modeFile)
     const setDefaultMode = panelHandlers.get('setDefaultSandboxMode')!
     const afterDefaultOn = await setDefaultMode({ enabled: true, workspacePath: wtB, agent: 'claude' })
     assert.equal(afterDefaultOn.defaultSandboxEnabled, true)

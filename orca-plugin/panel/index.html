@@ -1593,6 +1593,13 @@ details.egress-fold[open] > summary .fold-chevron {
         runCommandCheck(e.target.value);
       }
     });
+    window.orca?.plugin?.on?.("reportUpdated", (payload) => {
+      if (payload && typeof payload === "object" && payload.selectedWorkspace) {
+        panelState.currentReport = payload;
+        renderHeader();
+        renderActiveTab();
+      }
+    });
     window.addEventListener("focus", () => {
       loadReport();
     });
