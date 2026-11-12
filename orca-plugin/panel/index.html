@@ -252,18 +252,24 @@ button.primary {
   position: fixed;
   z-index: 9999;
   max-width: min(340px, calc(100vw - 16px));
-  padding: 6px 9px;
+  padding: 7px 10px;
   border-radius: 6px;
-  background: var(--card);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.42);
+  background-color: #161b22;
+  color: #e6edf3;
+  border: 1px solid #3d444d;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65);
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
   pointer-events: none;
+}
+html.light .orca-tooltip {
+  background-color: #ffffff;
+  color: #1f2328;
+  border-color: #d0d7de;
+  box-shadow: 0 8px 24px rgba(31, 35, 40, 0.18);
 }
 .grid-2 {
   display: grid;
@@ -774,7 +780,7 @@ details.egress-fold[open] > summary .fold-chevron {
           </div>` : "";
       return `
         <details class="egress-fold" data-egress="${escapeHtml(epKey)}" ${isOpen ? "open" : ""}>
-          <summary data-tooltip="${escapeHtml(boxTooltip)}">
+          <summary>
             <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
               <span class="fold-chevron">&#9654;</span>
               <span class="access-dot ${dotClass}"></span>
@@ -782,7 +788,7 @@ details.egress-fold[open] > summary .fold-chevron {
               ${scopeBadgeHtml}
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              <span class="source-pill" data-tooltip="${escapeHtml(boxTooltip)}">&#8984; ${escapeHtml(triggerLabel)}</span>
+              <span class="source-pill">&#8984; ${escapeHtml(triggerLabel)}</span>
             </div>
           </summary>
           <div class="egress-fold-body">
@@ -1662,16 +1668,10 @@ details.egress-fold[open] > summary .fold-chevron {
       const target = e.target;
       if (!(target instanceof HTMLElement))
         return;
-      const host = target.closest("[data-tooltip], [title]");
+      const host = target.closest("[data-tooltip]");
       if (!host) {
         tooltipEl.style.display = "none";
         return;
-      }
-      if (host.hasAttribute("title")) {
-        const t = host.getAttribute("title") || "";
-        if (t && !host.dataset.tooltip)
-          host.dataset.tooltip = t;
-        host.removeAttribute("title");
       }
       const text = host.dataset.tooltip?.trim();
       if (!text) {
@@ -1689,7 +1689,7 @@ details.egress-fold[open] > summary .fold-chevron {
       if (!tooltipEl)
         return;
       const related = e.relatedTarget;
-      if (!(related instanceof HTMLElement) || !related.closest("[data-tooltip], [title]")) {
+      if (!(related instanceof HTMLElement) || !related.closest("[data-tooltip]")) {
         tooltipEl.style.display = "none";
       }
     });

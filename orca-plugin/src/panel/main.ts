@@ -717,15 +717,10 @@ function bootstrapPanel(): void {
     if (!tooltipEl) return
     const target = e.target
     if (!(target instanceof HTMLElement)) return
-    const host = target.closest<HTMLElement>('[data-tooltip], [title]')
+    const host = target.closest<HTMLElement>('[data-tooltip]')
     if (!host) {
       tooltipEl.style.display = 'none'
       return
-    }
-    if (host.hasAttribute('title')) {
-      const t = host.getAttribute('title') || ''
-      if (t && !host.dataset.tooltip) host.dataset.tooltip = t
-      host.removeAttribute('title')
     }
     const text = host.dataset.tooltip?.trim()
     if (!text) {
@@ -744,7 +739,7 @@ function bootstrapPanel(): void {
   document.addEventListener('mouseout', e => {
     if (!tooltipEl) return
     const related = e.relatedTarget
-    if (!(related instanceof HTMLElement) || !related.closest('[data-tooltip], [title]')) {
+    if (!(related instanceof HTMLElement) || !related.closest('[data-tooltip]')) {
       tooltipEl.style.display = 'none'
     }
   })

@@ -145,7 +145,7 @@ export function renderEgressTab(): string {
 
       return `
         <details class="egress-fold" data-egress="${escapeHtml(epKey)}" ${isOpen ? 'open' : ''}>
-          <summary data-tooltip="${escapeHtml(boxTooltip)}">
+          <summary>
             <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
               <span class="fold-chevron">&#9654;</span>
               <span class="access-dot ${dotClass}"></span>
@@ -153,7 +153,7 @@ export function renderEgressTab(): string {
               ${scopeBadgeHtml}
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              <span class="source-pill" data-tooltip="${escapeHtml(boxTooltip)}">&#8984; ${escapeHtml(triggerLabel)}</span>
+              <span class="source-pill">&#8984; ${escapeHtml(triggerLabel)}</span>
             </div>
           </summary>
           <div class="egress-fold-body">
