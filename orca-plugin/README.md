@@ -1,6 +1,10 @@
 # ADE NVIDIA OpenShell Plugin — Orca Bridge & Policy Inspector (`local.openshell-bridge`)
 
-`local.openshell-bridge` (`v0.3.0`, part of `ade-nvidia-openshell-plugin`) is an Orca `1.4.248+` plugin that integrates **NVIDIA OpenShell** disposable Linux sandboxes with Orca **Terminal Mode**, **Structured Chat Mode**, **L7 Network Egress Popups**, and an interactive **OpenShell Policies** sidebar inspector.
+> [!NOTE]
+> **For Orca Catalog Maintainers & Security Reviewers**:
+> Please refer to [`REVIEW_GUIDE.md`](REVIEW_GUIDE.md) for the 30-second audit summary, zero-network-call verification, subprocess boundary breakdown, and unit test reproduction instructions.
+
+`local.openshell-bridge` (`v0.3.2`, part of `ade-nvidia-openshell-plugin`) is an Orca `1.4.248+` plugin that integrates **NVIDIA OpenShell** disposable Linux sandboxes with Orca **Terminal Mode**, **Structured Chat Mode**, **L7 Network Egress Popups**, and an interactive **OpenShell Policies** sidebar inspector.
 
 ---
 

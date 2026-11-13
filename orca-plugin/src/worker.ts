@@ -1,4 +1,15 @@
-// Orca invokes this worker for terminal agent launches, the OpenShell Policies panel, and CLI policy inspection commands.
+// ============================================================================
+// OpenShell Bridge — Orca Plugin Worker (src/worker.ts)
+// ============================================================================
+// SECURITY AUDIT SUMMARY FOR ORCA MAINTAINERS:
+// - Execution tier: 'trusted-worker' (required for agent.launch.before hook and local openshell queries).
+// - Host capabilities: [] (zero capabilities requested; no PTY, no shell, no network API).
+// - Outbound network calls: ZERO (no fetch, no http/https client, no telemetry/tracking).
+// - Subprocess boundary: Only invokes local 'openshell' binary with string[] argument arrays.
+// - Launch hook: Validates agent allowlist, strips internal env variables, verifies wrapper binaries.
+// See orca-plugin/REVIEW_GUIDE.md for complete audit steps.
+// ============================================================================
+
 import type { OrcaWorkerApi } from 'orca/worker'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -141,9 +152,20 @@ export default function activate(orca: OrcaWorkerApi): void {
       .catch(() => {})
   }
 
+  // --------------------------------------------------------------------------
+  // agent.launch.before Hook
+  // Fail-closed hook ("onError": "deny"):
+  // 1. Checks if agent is in the supported allowlist (claude, codex, antigravity).
+  // 2. Sanitizes environment variables to prevent bridge variable injection.
+  // 3. Checks per-worktree sandbox mode: if disabled, lets launch proceed on host.
+  // 4. Verifies wrapper binary exists before rewriting launch command.
+  // --------------------------------------------------------------------------
   orca.hooks.on('agent.launch.before', (event, next) => {
     if (event.agent) lastAgent = event.agent
+    // Ignore any agent outside our explicit wrapper allowlist
     if (!(event.agent in wrappers)) return next()
+
+    // Sanitize incoming environment to prevent untrusted OPENSHELL_BRIDGE_* injection
     const safeEnv = Object.fromEntries(
       Object.entries(event.env).filter(
         ([key]) => !key.startsWith('OPENSHELL_BRIDGE_') && key !== 'OPENSHELL_SANDBOX_DISABLED'

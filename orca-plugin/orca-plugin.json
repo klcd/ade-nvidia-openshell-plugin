@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "openshell-bridge",
   "name": "OpenShell Bridge",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Route Orca agent launches through NVIDIA OpenShell disposable Linux sandboxes. Includes 1-click worktree sandbox toggling, L7 egress approval popups, and an interactive policy inspector panel.",
   "homepage": "https://github.com/klcd/ade-nvidia-openshell-plugin",
   "repository": "https://github.com/klcd/ade-nvidia-openshell-plugin",
