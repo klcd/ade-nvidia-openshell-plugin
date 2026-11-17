@@ -91,6 +91,18 @@ export async function runAgyChatDaemon(
     const policy = loadMergedAgyPolicy(resolvedRoot, projectName);
     const providers = [...new Set(['antigravity', ...getExtraProviderNames()])];
 
+    const dockerBin = findHostBinary('docker') || 'docker';
+    try {
+      execFileSync(dockerBin, ['image', 'inspect', 'openshell-antigravity:latest'], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        timeout: 3000,
+      });
+    } catch {
+      console.error(`\n[OpenShell] Required sandbox Docker image "openshell-antigravity:latest" is not present.`);
+      console.error(`[OpenShell] Please run ./install.sh in the ade-nvidia-openshell-plugin directory to build all agent images.\n`);
+      throw new Error('Docker image openshell-antigravity:latest not found. Run ./install.sh to build.');
+    }
+
     logDebug(`Creating Antigravity Chat Mode sandbox ${sandboxName} for ${resolvedRoot}`);
     sandbox = OpenShellSandbox.create(
       sandboxName,

@@ -14,6 +14,7 @@ import {
   recordSessionEgressRule,
   removeTemporaryL7Rule,
   resolveCurrentTabSandbox,
+  runSandboxDoctor,
   setSandboxIdleTimeoutSeconds,
 } from './policy-inspector.ts'
 
@@ -770,6 +771,25 @@ test('Auto-Pause When Idle is strictly per-tab and Temporary L7 rules are scoped
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('runSandboxDoctor checks and verifies required Docker sandbox images', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-doctor-test-'))
+  try {
+    const report = await runSandboxDoctor(dir)
+    assert.ok(report)
+    assert.ok(Array.isArray(report.checks))
+    const imageCheck = report.checks.find(c => c.id === 'docker-images')
+    assert.ok(imageCheck, 'docker-images check must be present in doctor report')
+    assert.match(imageCheck.label, /Docker Sandbox Images/)
+    assert.equal(imageCheck.status, 'pass')
+    assert.match(imageCheck.detail, /openshell-codex:latest/)
+    assert.match(imageCheck.detail, /openshell-claude:latest/)
+    assert.match(imageCheck.detail, /openshell-antigravity:latest/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 
 
 

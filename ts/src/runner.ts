@@ -219,6 +219,19 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   }
 
   // 4. Create OpenShell Sandbox
+  const dockerBin = findHostBinary('docker') || 'docker';
+  try {
+    execFileSync(dockerBin, ['image', 'inspect', agent.containerImage], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+      timeout: 3000,
+    });
+  } catch {
+    console.error(`\n[OpenShell] Required sandbox Docker image "${agent.containerImage}" is not present.`);
+    console.error(`[OpenShell] Please run ./install.sh in the ade-nvidia-openshell-plugin directory to build all agent images.\n`);
+    fs.rmSync(stageDir, { recursive: true, force: true });
+    return 1;
+  }
+
   let sandbox: OpenShellSandbox;
   try {
     sandbox = OpenShellSandbox.create(
@@ -238,6 +251,7 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
       pid: process.pid,
     });
   } catch (err) {
+    console.error(`[OpenShell] Failed to create sandbox ${sandboxName}: ${err}`);
     logDebug(`Failed to create sandbox: ${err}. Refusing to run outside the sandbox.`);
     // OpenShell may retain an Error-phase sandbox after a failed create.
     new OpenShellSandbox(sandboxName).delete();

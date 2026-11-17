@@ -24,7 +24,7 @@ It outlines the trust boundary, execution requirements, subprocess boundaries, a
 You can verify all security guarantees locally using standard tools:
 
 ```bash
-# 1. Run all unit tests (9 tests, 100% passing)
+# 1. Run all unit tests (10 tests, 100% passing)
 orca plugin test ./orca-plugin --json
 
 # 2. Verify zero network requests in the plugin source
@@ -66,7 +66,7 @@ In [`src/worker.ts`](src/worker.ts):
 In [`src/sandbox/sandbox-control.ts`](src/sandbox/sandbox-control.ts) and [`src/policy/l7-mutator.ts`](src/policy/l7-mutator.ts):
 - Every subprocess execution uses `execFile` or `execFileSync` passing a `string[]` argument vector.
 - No untrusted input is interpolated into shell command strings.
-- Only the `openshell` binary is invoked (resolving from safe path directories).
+- Only the `openshell` binary and `docker` binary (for sandbox image inspection) are invoked (resolving from safe path directories).
 
 ### Invariant C: Local File System Boundaries
 In [`src/parsers/`](src/parsers/) and [`src/state/`](src/state/):

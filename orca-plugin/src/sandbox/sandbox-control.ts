@@ -67,6 +67,21 @@ export function resolveOpenShellBinary(homeDir = os.homedir()): string {
   return 'openshell'
 }
 
+export function resolveDockerBinary(homeDir = os.homedir()): string {
+  if (process.env.DOCKER_BIN && fs.existsSync(process.env.DOCKER_BIN)) {
+    return process.env.DOCKER_BIN
+  }
+  for (const dir of getAugmentedPathDirs(homeDir)) {
+    const candidate = path.join(dir, 'docker')
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return candidate
+      }
+    } catch {}
+  }
+  return 'docker'
+}
+
 export function parseSandboxListOutput(out: string): ActiveSandboxInfo[] {
   const trimmed = out.trim()
   if (trimmed.startsWith('{')) {
@@ -368,7 +383,47 @@ export async function runSandboxDoctor(homeDir = os.homedir()): Promise<SandboxD
     })
   }
 
-  // 5. Registry vs live sandbox reconciliation
+  // 5. Required Docker sandbox images
+  const expectedImages = [
+    'openshell-codex:latest',
+    'openshell-claude:latest',
+    'openshell-antigravity:latest',
+  ]
+  const dockerBin = resolveDockerBinary(homeDir)
+  try {
+    const dockerOut = execFileSync(dockerBin, ['images', '--format', '{{.Repository}}:{{.Tag}}'], {
+      encoding: 'utf8',
+      timeout: 4000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    })
+    const existingImages = new Set(dockerOut.split('\n').map(s => s.trim()).filter(Boolean))
+    const missingImages = expectedImages.filter(img => !existingImages.has(img))
+    if (missingImages.length === 0) {
+      checks.push({
+        id: 'docker-images',
+        label: 'Docker Sandbox Images',
+        status: 'pass',
+        detail: `All required agent images present (${expectedImages.join(', ')})`,
+      })
+    } else {
+      checks.push({
+        id: 'docker-images',
+        label: 'Docker Sandbox Images',
+        status: 'fail',
+        detail: `Missing: ${missingImages.join(', ')} (run ./install.sh to build)`,
+      })
+    }
+  } catch (err: any) {
+    checks.push({
+      id: 'docker-images',
+      label: 'Docker Sandbox Images',
+      status: 'warn',
+      detail: `Could not verify Docker images: ${String(err?.message || err).trim()}`,
+    })
+  }
+
+  // 6. Registry vs live sandbox reconciliation
   const registryMap = readSandboxRegistryMap(homeDir)
   const liveNames = new Set(liveSandboxes.map(s => s.name))
   const staleRegistered: string[] = []
