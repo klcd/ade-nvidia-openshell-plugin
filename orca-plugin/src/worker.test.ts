@@ -782,6 +782,7 @@ test('runSandboxDoctor checks and verifies required Docker sandbox images', asyn
     assert.ok(imageCheck, 'docker-images check must be present in doctor report')
     assert.match(imageCheck.label, /Docker Sandbox Images/)
     assert.equal(imageCheck.status, 'pass')
+    assert.match(imageCheck.detail, /openshell-base:latest/)
     assert.match(imageCheck.detail, /openshell-codex:latest/)
     assert.match(imageCheck.detail, /openshell-claude:latest/)
     assert.match(imageCheck.detail, /openshell-antigravity:latest/)

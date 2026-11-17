@@ -385,6 +385,7 @@ export async function runSandboxDoctor(homeDir = os.homedir()): Promise<SandboxD
 
   // 5. Required Docker sandbox images
   const expectedImages = [
+    'openshell-base:latest',
     'openshell-codex:latest',
     'openshell-claude:latest',
     'openshell-antigravity:latest',
