@@ -678,7 +678,7 @@ export async function executeTestCliCommand(
       ...baseEnv,
       ORCA_AGENT_SESSION_ID: `panel-tester-${projectName}`,
     },
-    timeoutMs: Math.max(timeoutMs, 45000),
+    timeoutMs: Math.min(Math.max(timeoutMs, 25000), 28000),
   })
   await refreshActiveSandboxesCache(true)
   const updatedRegistry = readSandboxRegistryMap(homeDir)

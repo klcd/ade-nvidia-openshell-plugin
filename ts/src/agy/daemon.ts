@@ -6,6 +6,7 @@ import { pruneSandboxSessionEgress } from '../../../orca-plugin/src/state/sessio
 import {
   buildStagedGitConfig,
   detectProjectRoot,
+  findHostBinary,
   generateSandboxName,
   getSandboxIdleTimeoutSeconds,
   logDebug,
