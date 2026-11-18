@@ -112,9 +112,26 @@ export function formatCliPolicySummary(workspacePath?: string): string {
 
 export default function activate(orca: OrcaWorkerApi): void {
   let lastAgent: string | undefined
+  let isSwitchingMode = false
 
-  const updateStatusBarFromReport = (report: PolicyInspectionReport) => {
+  const setStatusBarSwitching = (nextEnabled: boolean) => {
     if (!orca.host?.call) return
+    isSwitchingMode = true
+    void orca.host.call('statusBar.update', {
+      id: 'openshell-status',
+      text: nextEnabled ? 'Starting...' : 'Stopping...',
+      icon: 'sync',
+      tone: 'neutral',
+      tooltip: nextEnabled
+        ? 'Starting OpenShell sandbox and switching mode...'
+        : 'Disabling sandbox and switching to host execution...',
+      visible: true,
+    }).catch(() => {})
+  }
+
+  const updateStatusBarFromReport = (report: PolicyInspectionReport, force = false) => {
+    if (!orca.host?.call) return
+    if (isSwitchingMode && !force) return
     try {
       const currentSb = report.activeSandboxes[0] || null
       const isPaused = Boolean(currentSb && /stopped/i.test(currentSb.phase || ''))
@@ -235,6 +252,8 @@ export default function activate(orca: OrcaWorkerApi): void {
       req.workspacePath ||
       resolveWorkspacePathById(req.workspaceId) ||
       discoverCurrentOrcaContext({ agent: req.agent, fallbackAgent: lastAgent }).workspace.path
+
+    setStatusBarSwitching(Boolean(req.enabled))
     setSandboxMode(Boolean(req.enabled), {
       workspacePath: targetWorkspacePath,
       workspaceId: req.workspaceId,
@@ -245,7 +264,8 @@ export default function activate(orca: OrcaWorkerApi): void {
       agent: req.agent,
       fallbackAgent: lastAgent,
     })
-    updateStatusBarFromReport(report)
+    isSwitchingMode = false
+    updateStatusBarFromReport(report, true)
     broadcastReportToPanels(report)
     return toStrictJson(report)
   })
@@ -485,17 +505,32 @@ export default function activate(orca: OrcaWorkerApi): void {
       workspaceId: targetWorkspaceId,
     })
     const nextEnabled = typeof req.enabled === 'boolean' ? req.enabled : !currentMode.enabled
+
+    setStatusBarSwitching(nextEnabled)
+    try {
+      orca.panels?.post?.('sandboxSwitching', { nextEnabled })
+    } catch {}
+
+    const startTime = Date.now()
     setSandboxMode(nextEnabled, {
       workspacePath: targetWorkspacePath,
       workspaceId: targetWorkspaceId,
     })
+
+    if (process.env.NODE_ENV !== 'test') {
+      const elapsed = Date.now() - startTime
+      if (elapsed < 350) {
+        await new Promise(r => setTimeout(r, 350 - elapsed))
+      }
+    }
 
     const report = await buildPolicyReportAsync({
       workspacePath: targetWorkspacePath,
       agent: req.agent,
       fallbackAgent: lastAgent,
     })
-    updateStatusBarFromReport(report)
+    isSwitchingMode = false
+    updateStatusBarFromReport(report, true)
     broadcastReportToPanels(report)
 
     const modeLabel = report.sandboxEnabled ? 'On (Enforced)' : 'Off (Host Mode)'

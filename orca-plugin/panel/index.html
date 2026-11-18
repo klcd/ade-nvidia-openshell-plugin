@@ -1665,8 +1665,29 @@ details.egress-fold[open] > summary .fold-chevron {
       if (tooltipEl)
         tooltipEl.style.display = "none";
     }, true);
+    window.orca?.plugin?.on?.("sandboxSwitching", (payload) => {
+      const nextEnabled = Boolean(payload?.nextEnabled);
+      panelState.togglingSandbox = true;
+      const toggleBtn = document.getElementById("sandboxToggleBtn");
+      const toggleLabel = document.getElementById("sandboxToggleLabel");
+      const badge = document.getElementById("sandboxBadge");
+      if (toggleBtn) {
+        toggleBtn.disabled = true;
+        toggleBtn.classList.add("is-switching");
+        toggleBtn.setAttribute("aria-checked", nextEnabled ? "true" : "false");
+      }
+      if (toggleLabel) {
+        toggleLabel.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? "Starting..." : "Stopping..."}`;
+      }
+      if (badge) {
+        badge.className = "badge neutral pulse";
+        badge.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? "Starting Sandbox..." : "Switching to Host..."}`;
+        badge.title = nextEnabled ? "Starting and configuring OpenShell sandbox for this worktree..." : "Disabling sandbox and switching to host execution...";
+      }
+    });
     window.orca?.plugin?.on?.("reportUpdated", (payload) => {
       if (payload && typeof payload === "object" && payload.selectedWorkspace) {
+        panelState.togglingSandbox = false;
         panelState.currentReport = payload;
         renderHeader();
         renderActiveTab();

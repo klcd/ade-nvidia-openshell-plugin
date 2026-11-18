@@ -787,8 +787,33 @@ function bootstrapPanel(): void {
     if (tooltipEl) tooltipEl.style.display = 'none'
   }, true)
 
+  window.orca?.plugin?.on?.('sandboxSwitching', (payload: any) => {
+    const nextEnabled = Boolean(payload?.nextEnabled)
+    panelState.togglingSandbox = true
+    const toggleBtn = document.getElementById('sandboxToggleBtn') as HTMLButtonElement | null
+    const toggleLabel = document.getElementById('sandboxToggleLabel')
+    const badge = document.getElementById('sandboxBadge')
+
+    if (toggleBtn) {
+      toggleBtn.disabled = true
+      toggleBtn.classList.add('is-switching')
+      toggleBtn.setAttribute('aria-checked', nextEnabled ? 'true' : 'false')
+    }
+    if (toggleLabel) {
+      toggleLabel.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? 'Starting...' : 'Stopping...'}`
+    }
+    if (badge) {
+      badge.className = 'badge neutral pulse'
+      badge.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? 'Starting Sandbox...' : 'Switching to Host...'}`
+      badge.title = nextEnabled
+        ? 'Starting and configuring OpenShell sandbox for this worktree...'
+        : 'Disabling sandbox and switching to host execution...'
+    }
+  })
+
   window.orca?.plugin?.on?.('reportUpdated', (payload: any) => {
     if (payload && typeof payload === 'object' && payload.selectedWorkspace) {
+      panelState.togglingSandbox = false
       panelState.currentReport = payload as PolicyInspectionReport
       renderHeader()
       renderActiveTab()
