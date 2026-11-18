@@ -180,9 +180,12 @@ async function runCommandCheck(
       report.sandboxEnabled !== false
         ? `OpenShell Sandbox (${report.activeSandboxes?.[0]?.name || report.selectedWorkspace.name})`
         : `Host (${report.selectedWorkspace.name})`
-    box.innerHTML = `<div style="display:flex;align-items:center;gap:8px;"><span class="badge neutral">Running...</span><span class="sub">Executing <code class="mono">${escapeHtml(trimmed)}</code> in ${escapeHtml(targetLabel)}...</span></div>`
+    box.innerHTML = `<div style="display:flex;align-items:center;gap:8px;"><span class="badge neutral pulse"><span class="spinner-inline"></span> Running...</span><span class="sub">Executing <code class="mono">${escapeHtml(trimmed)}</code> in ${escapeHtml(targetLabel)}...</span></div>`
     if (testBtn) testBtn.disabled = true
-    if (runCmdBtn) runCmdBtn.disabled = true
+    if (runCmdBtn) {
+      runCmdBtn.disabled = true
+      runCmdBtn.innerHTML = `<span class="spinner-inline"></span> Running...`
+    }
   }
 
   try {
@@ -281,7 +284,10 @@ async function runCommandCheck(
     box.innerHTML = `<div style="display:flex;align-items:center;gap:6px;"><span class="access-dot deny"></span><div>${escapeHtml(err?.message || err)}</div></div>`
   } finally {
     if (testBtn) testBtn.disabled = false
-    if (runCmdBtn) runCmdBtn.disabled = false
+    if (runCmdBtn) {
+      runCmdBtn.disabled = false
+      runCmdBtn.textContent = 'Run'
+    }
   }
 }
 
@@ -336,7 +342,7 @@ async function toggleSandboxMode(): Promise<void> {
     toggleBtn.setAttribute('aria-checked', nextEnabled ? 'true' : 'false')
   }
   if (toggleLabel) {
-    toggleLabel.textContent = nextEnabled ? 'Starting...' : 'Stopping...'
+    toggleLabel.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? 'Starting...' : 'Stopping...'}`
   }
   if (badge) {
     badge.className = 'badge neutral pulse'
@@ -346,6 +352,7 @@ async function toggleSandboxMode(): Promise<void> {
       : 'Disabling sandbox and switching to host execution...'
   }
 
+  const startTime = Date.now()
   try {
     const res = (await window.orca.plugin.request('setSandboxMode', {
       enabled: nextEnabled,
@@ -353,6 +360,12 @@ async function toggleSandboxMode(): Promise<void> {
       workspaceId: report.selectedWorkspace?.id,
       agent: report.currentAgent,
     })) as PolicyInspectionReport
+
+    const elapsed = Date.now() - startTime
+    if (elapsed < 350) {
+      await new Promise(r => setTimeout(r, 350 - elapsed))
+    }
+
     panelState.currentReport = res
     panelState.togglingSandbox = false
     renderHeader()

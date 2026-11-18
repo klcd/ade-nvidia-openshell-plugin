@@ -1105,11 +1105,13 @@ details.egress-fold[open] > summary .fold-chevron {
     if (execute) {
       box.style.display = "flex";
       const targetLabel = report.sandboxEnabled !== false ? `OpenShell Sandbox (${report.activeSandboxes?.[0]?.name || report.selectedWorkspace.name})` : `Host (${report.selectedWorkspace.name})`;
-      box.innerHTML = `<div style="display:flex;align-items:center;gap:8px;"><span class="badge neutral">Running...</span><span class="sub">Executing <code class="mono">${escapeHtml(trimmed)}</code> in ${escapeHtml(targetLabel)}...</span></div>`;
+      box.innerHTML = `<div style="display:flex;align-items:center;gap:8px;"><span class="badge neutral pulse"><span class="spinner-inline"></span> Running...</span><span class="sub">Executing <code class="mono">${escapeHtml(trimmed)}</code> in ${escapeHtml(targetLabel)}...</span></div>`;
       if (testBtn)
         testBtn.disabled = true;
-      if (runCmdBtn)
+      if (runCmdBtn) {
         runCmdBtn.disabled = true;
+        runCmdBtn.innerHTML = `<span class="spinner-inline"></span> Running...`;
+      }
     }
     try {
       const res = await window.orca.plugin.request("evaluateCommand", {
@@ -1192,8 +1194,10 @@ details.egress-fold[open] > summary .fold-chevron {
     } finally {
       if (testBtn)
         testBtn.disabled = false;
-      if (runCmdBtn)
+      if (runCmdBtn) {
         runCmdBtn.disabled = false;
+        runCmdBtn.textContent = "Run";
+      }
     }
   }
   async function loadReport() {
@@ -1233,13 +1237,14 @@ details.egress-fold[open] > summary .fold-chevron {
       toggleBtn.setAttribute("aria-checked", nextEnabled ? "true" : "false");
     }
     if (toggleLabel) {
-      toggleLabel.textContent = nextEnabled ? "Starting..." : "Stopping...";
+      toggleLabel.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? "Starting..." : "Stopping..."}`;
     }
     if (badge) {
       badge.className = "badge neutral pulse";
       badge.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? "Starting Sandbox..." : "Switching to Host..."}`;
       badge.title = nextEnabled ? "Starting and configuring OpenShell sandbox for this worktree..." : "Disabling sandbox and switching to host execution...";
     }
+    const startTime = Date.now();
     try {
       const res = await window.orca.plugin.request("setSandboxMode", {
         enabled: nextEnabled,
@@ -1247,6 +1252,10 @@ details.egress-fold[open] > summary .fold-chevron {
         workspaceId: report.selectedWorkspace?.id,
         agent: report.currentAgent
       });
+      const elapsed = Date.now() - startTime;
+      if (elapsed < 350) {
+        await new Promise((r) => setTimeout(r, 350 - elapsed));
+      }
       panelState.currentReport = res;
       panelState.togglingSandbox = false;
       renderHeader();
