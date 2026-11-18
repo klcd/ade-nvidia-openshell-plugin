@@ -29,7 +29,7 @@ function renderHeader(): void {
   const runningCount = currentSb && !isPausedSb ? 1 : 0
   const pausedCount = currentSb && isPausedSb ? 1 : 0
   const badge = document.getElementById('sandboxBadge')
-  if (badge) {
+  if (badge && !panelState.togglingSandbox) {
     if (!sbEnabled) {
       badge.className = 'badge warn'
       badge.textContent = inheritedFrom ? 'Off (Parent)' : 'Off (Host)'
@@ -50,11 +50,19 @@ function renderHeader(): void {
   }
 
   const toggleBtn = document.getElementById('sandboxToggleBtn') as HTMLButtonElement | null
+  const toggleLabel = document.getElementById('sandboxToggleLabel')
   if (toggleBtn) {
-    toggleBtn.setAttribute('aria-checked', sbEnabled ? 'true' : 'false')
+    if (!panelState.togglingSandbox) {
+      toggleBtn.setAttribute('aria-checked', sbEnabled ? 'true' : 'false')
+      toggleBtn.classList.remove('is-switching')
+      toggleBtn.disabled = false
+    }
     toggleBtn.title = inheritedFrom
       ? `Sandbox mode for ${ws.name} (currently inherited from ${parentLabel})`
       : `Activate or deactivate OpenShell sandboxing for ${ws.name} and its child workspaces`
+  }
+  if (toggleLabel && !panelState.togglingSandbox) {
+    toggleLabel.textContent = sbEnabled ? 'Sandbox' : 'Host'
   }
 
   const bypassNotice = document.getElementById('bypassNotice')
@@ -319,7 +327,25 @@ async function toggleSandboxMode(): Promise<void> {
   panelState.togglingSandbox = true
   const nextEnabled = report.sandboxEnabled === false
   const toggleBtn = document.getElementById('sandboxToggleBtn') as HTMLButtonElement | null
-  if (toggleBtn) toggleBtn.disabled = true
+  const toggleLabel = document.getElementById('sandboxToggleLabel')
+  const badge = document.getElementById('sandboxBadge')
+
+  if (toggleBtn) {
+    toggleBtn.disabled = true
+    toggleBtn.classList.add('is-switching')
+    toggleBtn.setAttribute('aria-checked', nextEnabled ? 'true' : 'false')
+  }
+  if (toggleLabel) {
+    toggleLabel.textContent = nextEnabled ? 'Starting...' : 'Stopping...'
+  }
+  if (badge) {
+    badge.className = 'badge neutral pulse'
+    badge.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? 'Starting Sandbox...' : 'Switching to Host...'}`
+    badge.title = nextEnabled
+      ? 'Starting and configuring OpenShell sandbox for this worktree...'
+      : 'Disabling sandbox and switching to host execution...'
+  }
+
   try {
     const res = (await window.orca.plugin.request('setSandboxMode', {
       enabled: nextEnabled,
@@ -328,13 +354,20 @@ async function toggleSandboxMode(): Promise<void> {
       agent: report.currentAgent,
     })) as PolicyInspectionReport
     panelState.currentReport = res
+    panelState.togglingSandbox = false
     renderHeader()
     renderActiveTab()
     const cmd = getInputValue('cmdInput').trim()
     if (cmd) await runCommandCheck(cmd)
-  } catch {} finally {
+  } catch {
     panelState.togglingSandbox = false
-    if (toggleBtn) toggleBtn.disabled = false
+    renderHeader()
+  } finally {
+    panelState.togglingSandbox = false
+    if (toggleBtn) {
+      toggleBtn.disabled = false
+      toggleBtn.classList.remove('is-switching')
+    }
   }
 }
 

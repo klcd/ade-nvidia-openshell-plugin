@@ -467,6 +467,34 @@ details.egress-fold[open] > summary .fold-chevron {
 .sandbox-toggle[aria-checked="true"] .toggle-thumb {
   transform: translateX(12px);
 }
+.sandbox-toggle.is-switching {
+  opacity: 0.75;
+  cursor: wait;
+}
+.sandbox-toggle.is-switching .toggle-track {
+  filter: brightness(0.9);
+}
+.spinner-inline {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: inline-spin 0.6s linear infinite;
+  vertical-align: middle;
+}
+@keyframes inline-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.badge.pulse {
+  animation: pulse-soft 1.2s ease-in-out infinite;
+  gap: 4px;
+}
 .bypass-notice {
   display: flex;
   align-items: center;
@@ -958,7 +986,7 @@ details.egress-fold[open] > summary .fold-chevron {
     const runningCount = currentSb && !isPausedSb ? 1 : 0;
     const pausedCount = currentSb && isPausedSb ? 1 : 0;
     const badge = document.getElementById("sandboxBadge");
-    if (badge) {
+    if (badge && !panelState.togglingSandbox) {
       if (!sbEnabled) {
         badge.className = "badge warn";
         badge.textContent = inheritedFrom ? "Off (Parent)" : "Off (Host)";
@@ -978,9 +1006,17 @@ details.egress-fold[open] > summary .fold-chevron {
       }
     }
     const toggleBtn = document.getElementById("sandboxToggleBtn");
+    const toggleLabel = document.getElementById("sandboxToggleLabel");
     if (toggleBtn) {
-      toggleBtn.setAttribute("aria-checked", sbEnabled ? "true" : "false");
+      if (!panelState.togglingSandbox) {
+        toggleBtn.setAttribute("aria-checked", sbEnabled ? "true" : "false");
+        toggleBtn.classList.remove("is-switching");
+        toggleBtn.disabled = false;
+      }
       toggleBtn.title = inheritedFrom ? `Sandbox mode for ${ws.name} (currently inherited from ${parentLabel})` : `Activate or deactivate OpenShell sandboxing for ${ws.name} and its child workspaces`;
+    }
+    if (toggleLabel && !panelState.togglingSandbox) {
+      toggleLabel.textContent = sbEnabled ? "Sandbox" : "Host";
     }
     const bypassNotice = document.getElementById("bypassNotice");
     const bypassNoticeText = document.getElementById("bypassNoticeText");
@@ -1189,8 +1225,21 @@ details.egress-fold[open] > summary .fold-chevron {
     panelState.togglingSandbox = true;
     const nextEnabled = report.sandboxEnabled === false;
     const toggleBtn = document.getElementById("sandboxToggleBtn");
-    if (toggleBtn)
+    const toggleLabel = document.getElementById("sandboxToggleLabel");
+    const badge = document.getElementById("sandboxBadge");
+    if (toggleBtn) {
       toggleBtn.disabled = true;
+      toggleBtn.classList.add("is-switching");
+      toggleBtn.setAttribute("aria-checked", nextEnabled ? "true" : "false");
+    }
+    if (toggleLabel) {
+      toggleLabel.textContent = nextEnabled ? "Starting..." : "Stopping...";
+    }
+    if (badge) {
+      badge.className = "badge neutral pulse";
+      badge.innerHTML = `<span class="spinner-inline"></span> ${nextEnabled ? "Starting Sandbox..." : "Switching to Host..."}`;
+      badge.title = nextEnabled ? "Starting and configuring OpenShell sandbox for this worktree..." : "Disabling sandbox and switching to host execution...";
+    }
     try {
       const res = await window.orca.plugin.request("setSandboxMode", {
         enabled: nextEnabled,
@@ -1199,16 +1248,21 @@ details.egress-fold[open] > summary .fold-chevron {
         agent: report.currentAgent
       });
       panelState.currentReport = res;
+      panelState.togglingSandbox = false;
       renderHeader();
       renderActiveTab();
       const cmd = getInputValue("cmdInput").trim();
       if (cmd)
         await runCommandCheck(cmd);
     } catch {
+      panelState.togglingSandbox = false;
+      renderHeader();
     } finally {
       panelState.togglingSandbox = false;
-      if (toggleBtn)
+      if (toggleBtn) {
         toggleBtn.disabled = false;
+        toggleBtn.classList.remove("is-switching");
+      }
     }
   }
   function renderActiveTab() {

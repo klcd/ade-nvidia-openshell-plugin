@@ -460,6 +460,34 @@ details.egress-fold[open] > summary .fold-chevron {
 .sandbox-toggle[aria-checked="true"] .toggle-thumb {
   transform: translateX(12px);
 }
+.sandbox-toggle.is-switching {
+  opacity: 0.75;
+  cursor: wait;
+}
+.sandbox-toggle.is-switching .toggle-track {
+  filter: brightness(0.9);
+}
+.spinner-inline {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: inline-spin 0.6s linear infinite;
+  vertical-align: middle;
+}
+@keyframes inline-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.badge.pulse {
+  animation: pulse-soft 1.2s ease-in-out infinite;
+  gap: 4px;
+}
 .bypass-notice {
   display: flex;
   align-items: center;
