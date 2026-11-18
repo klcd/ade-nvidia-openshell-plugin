@@ -28,6 +28,12 @@ function renderHeader(): void {
   const isPausedSb = Boolean(currentSb && /stopped/i.test(currentSb.phase || ''))
   const runningCount = currentSb && !isPausedSb ? 1 : 0
   const pausedCount = currentSb && isPausedSb ? 1 : 0
+  const imgReport = report.sandboxImages
+  const missingImages = imgReport?.missingImages || []
+  const hasImageAlarm = Boolean(
+    sbEnabled && imgReport && (!imgReport.dockerAvailable || !imgReport.allPresent)
+  )
+
   const badge = document.getElementById('sandboxBadge')
   if (badge && !panelState.togglingSandbox) {
     if (!sbEnabled) {
@@ -42,6 +48,12 @@ function renderHeader(): void {
       badge.className = 'badge neutral'
       badge.textContent = 'Paused'
       badge.title = `Current tab sandbox: ${currentSb.name} (Paused)`
+    } else if (hasImageAlarm) {
+      badge.className = 'badge deny'
+      badge.textContent = !imgReport.dockerAvailable ? 'Docker Down' : 'Images Missing'
+      badge.title = !imgReport.dockerAvailable
+        ? 'Docker daemon is not running or docker CLI is not found'
+        : `Missing ${missingImages.length} required sandbox container image(s): ${missingImages.join(', ')}`
     } else {
       badge.className = 'badge neutral'
       badge.textContent = 'Enforced'
@@ -74,6 +86,42 @@ function renderHeader(): void {
     bypassNoticeText.textContent = inheritedFrom
       ? `Sandboxing deactivated for ${ws.name} (inherited from ${parentLabel}) \u2014 new agent tabs & chat commands run directly on host.`
       : `Sandboxing deactivated for ${ws.name} \u2014 new agent tabs & chat commands run directly on host.`
+  }
+
+  const imageAlarmNotice = document.getElementById('imageAlarmNotice')
+  const imageAlarmTitle = document.getElementById('imageAlarmTitle')
+  const imageAlarmDesc = document.getElementById('imageAlarmDesc')
+  const imageAlarmCountBadge = document.getElementById('imageAlarmCountBadge')
+  const systemAlarmBadge = document.getElementById('systemAlarmBadge')
+
+  if (imageAlarmNotice) {
+    imageAlarmNotice.style.display = hasImageAlarm ? 'flex' : 'none'
+  }
+  if (hasImageAlarm) {
+    if (!imgReport.dockerAvailable) {
+      if (imageAlarmTitle) imageAlarmTitle.textContent = 'Docker Daemon Unavailable'
+      if (imageAlarmDesc) {
+        imageAlarmDesc.textContent =
+          imgReport.error ||
+          'Docker daemon is not running or docker CLI is not found. Start Docker to use sandbox mode.'
+      }
+      if (imageAlarmCountBadge) {
+        imageAlarmCountBadge.textContent = 'DOWN'
+      }
+    } else {
+      if (imageAlarmTitle) imageAlarmTitle.textContent = 'Required Sandbox Container Images Missing'
+      if (imageAlarmDesc) {
+        imageAlarmDesc.textContent = `Missing ${missingImages.length} required container image(s): ${missingImages.join(', ')}. Sandbox mode cannot start containers until built.`
+      }
+      if (imageAlarmCountBadge) {
+        const presentCount = (imgReport.images || []).filter(i => i.present).length
+        const totalCount = imgReport.images?.length || 4
+        imageAlarmCountBadge.textContent = `${presentCount}/${totalCount}`
+      }
+    }
+  }
+  if (systemAlarmBadge) {
+    systemAlarmBadge.style.display = hasImageAlarm ? 'inline-flex' : 'none'
   }
 
   const projLabel = document.getElementById('projectLabel')

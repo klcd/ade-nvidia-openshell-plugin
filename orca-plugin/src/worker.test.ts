@@ -9,6 +9,7 @@ import {
   buildPolicyReport,
   evaluateCommandPolicy,
   getSandboxIdleTimeoutSeconds,
+  parseDockerImagesOutput,
   parsePermissionYaml,
   pruneSandboxRegistryEntry,
   recordSessionEgressRule,
@@ -16,6 +17,7 @@ import {
   resolveCurrentTabSandbox,
   runSandboxDoctor,
   setSandboxIdleTimeoutSeconds,
+  REQUIRED_SANDBOX_IMAGES,
 } from './policy-inspector.ts'
 
 test('rewrites Orca launch command while preserving flags and prompt', () => {
@@ -786,6 +788,45 @@ test('runSandboxDoctor checks and verifies required Docker sandbox images', asyn
     assert.match(imageCheck.detail, /openshell-codex:latest/)
     assert.match(imageCheck.detail, /openshell-claude:latest/)
     assert.match(imageCheck.detail, /openshell-antigravity:latest/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('inspects sandbox container images, parses docker output, and reports image health & alarm state', () => {
+  // 1. Verify parser handles tab-separated output with name, size, and creation timestamp
+  const mockDockerOutput = [
+    'openshell-claude:latest\t2.34GB\t2026-11-17 22:17:46 +0100 CET',
+    'openshell-antigravity:latest\t2.28GB\t2026-11-17 22:17:11 +0100 CET',
+    'openshell-base:latest\t2.02GB\t2026-11-17 22:16:10 +0100 CET',
+    'openshell-codex:latest\t2.59GB\t2026-11-08 11:58:02 +0100 CET',
+  ].join('\n')
+
+  const parsed = parseDockerImagesOutput(mockDockerOutput)
+  assert.equal(parsed.size, 4)
+  assert.equal(parsed.get('openshell-claude:latest')?.size, '2.34GB')
+  assert.equal(parsed.get('openshell-base:latest')?.size, '2.02GB')
+  assert.equal(parsed.get('openshell-codex:latest')?.size, '2.59GB')
+  assert.equal(parsed.get('openshell-antigravity:latest')?.size, '2.28GB')
+
+  // 2. Verify REQUIRED_SANDBOX_IMAGES contains all 4 expected images
+  const reqNames = REQUIRED_SANDBOX_IMAGES.map(i => i.name)
+  assert.deepEqual(reqNames, [
+    'openshell-base:latest',
+    'openshell-antigravity:latest',
+    'openshell-claude:latest',
+    'openshell-codex:latest',
+  ])
+
+  // 3. Verify PolicyInspectionReport includes sandboxImages report
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-images-report-test-'))
+  try {
+    const report = buildPolicyReport({ workspacePath: dir, agent: 'antigravity', homeDir: dir })
+    assert.ok(report.sandboxImages, 'PolicyInspectionReport must contain sandboxImages')
+    assert.equal(Array.isArray(report.sandboxImages.images), true)
+    assert.equal(report.sandboxImages.images.length, 4)
+    assert.ok(typeof report.sandboxImages.allPresent === 'boolean')
+    assert.ok(Array.isArray(report.sandboxImages.missingImages))
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

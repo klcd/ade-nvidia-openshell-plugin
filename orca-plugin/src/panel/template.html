@@ -24,6 +24,19 @@
       <span class="access-dot l7" title="Host Mode"></span>
       <span id="bypassNoticeText">Sandboxing deactivated for this worktree &mdash; new agent tabs &amp; chat commands run directly on host.</span>
     </div>
+    <div id="imageAlarmNotice" class="image-alarm" style="display:none;">
+      <div class="image-alarm-header">
+        <span class="alarm-icon">⚠️</span>
+        <strong id="imageAlarmTitle">Required Sandbox Images Missing</strong>
+        <span id="imageAlarmCountBadge" class="badge deny">0/4</span>
+      </div>
+      <div id="imageAlarmDesc" class="image-alarm-desc">
+        One or more required container images are not installed in Docker.
+      </div>
+      <div class="image-alarm-actions">
+        <button id="copyInstallBtn" class="small primary" title="Copy repository build command to clipboard" data-copy="./install.sh">Copy ./install.sh</button>
+      </div>
+    </div>
     <div id="contextBanner" class="grid-2" style="margin-top:2px;">
       <div class="stat-box" id="projectStatBox" style="flex-direction:row;justify-content:space-between;align-items:center;padding:7px 10px;">
         <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
@@ -57,7 +70,7 @@
 
   <div class="tabs">
     <button class="tab active" data-tab="egress">Sandbox Egress (<span id="egressCount">0</span>)</button>
-    <button class="tab" data-tab="system">Sandbox System</button>
+    <button class="tab" data-tab="system">Sandbox System <span id="systemAlarmBadge" class="badge deny" style="display:none;margin-left:4px;padding:1px 5px;font-size:10px;">!</span></button>
   </div>
 
   <div id="tabContent"></div>

@@ -10,6 +10,8 @@ import {
   type PolicyInspectionReport,
   type SandboxDoctorCheck,
   type SandboxDoctorReport,
+  type SandboxImageItem,
+  type SandboxImagesReport,
 } from '../types.ts'
 import { pruneSandboxRegistryEntry } from '../state/sandbox-mode.ts'
 import { readSandboxRegistryMap } from '../state/sandbox-registry.ts'
@@ -80,6 +82,197 @@ export function resolveDockerBinary(homeDir = os.homedir()): string {
     } catch {}
   }
   return 'docker'
+}
+
+export const REQUIRED_SANDBOX_IMAGES: ReadonlyArray<{
+  name: string
+  role: string
+}> = [
+  { name: 'openshell-base:latest', role: 'Base sandbox container (NixOS rootfs & system tools)' },
+  { name: 'openshell-antigravity:latest', role: 'Google Antigravity agent container (gRPC & CLI)' },
+  { name: 'openshell-claude:latest', role: 'Claude Code agent container (Node & CLI)' },
+  { name: 'openshell-codex:latest', role: 'OpenAI Codex agent container (Node & CLI)' },
+]
+
+let cachedSandboxImages: SandboxImagesReport = {
+  dockerAvailable: true,
+  allPresent: true,
+  missingImages: [],
+  images: REQUIRED_SANDBOX_IMAGES.map(req => {
+    const [repo, tag = 'latest'] = req.name.split(':')
+    return {
+      name: req.name,
+      repository: repo,
+      tag,
+      role: req.role,
+      present: true,
+    }
+  }),
+  checkedAt: new Date().toISOString(),
+}
+let lastSandboxImagesRefreshAt = 0
+let sandboxImagesRefreshInFlight: Promise<SandboxImagesReport> | null = null
+
+export function parseDockerImagesOutput(
+  stdout: string
+): Map<string, { size: string; createdAt: string }> {
+  const map = new Map<string, { size: string; createdAt: string }>()
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const parts = trimmed.split('\t')
+    const imgName = parts[0]?.trim()
+    if (imgName) {
+      map.set(imgName, {
+        size: parts[1]?.trim() || '',
+        createdAt: parts[2]?.trim() || '',
+      })
+    }
+  }
+  return map
+}
+
+export function inspectSandboxImagesSync(homeDir = os.homedir()): SandboxImagesReport {
+  const dockerBin = resolveDockerBinary(homeDir)
+  const env = getAugmentedEnv(homeDir)
+  try {
+    const dockerOut = execFileSync(
+      dockerBin,
+      ['images', '--format', '{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}'],
+      {
+        encoding: 'utf8',
+        timeout: 4000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env,
+      }
+    )
+    const existing = parseDockerImagesOutput(dockerOut)
+    const items: SandboxImageItem[] = REQUIRED_SANDBOX_IMAGES.map(req => {
+      const [repo, tag = 'latest'] = req.name.split(':')
+      const info = existing.get(req.name)
+      return {
+        name: req.name,
+        repository: repo,
+        tag,
+        role: req.role,
+        present: Boolean(info),
+        size: info?.size,
+        createdAt: info?.createdAt,
+      }
+    })
+    const missing = items.filter(it => !it.present).map(it => it.name)
+    const report: SandboxImagesReport = {
+      dockerAvailable: true,
+      allPresent: missing.length === 0,
+      missingImages: missing,
+      images: items,
+      checkedAt: new Date().toISOString(),
+    }
+    cachedSandboxImages = report
+    lastSandboxImagesRefreshAt = Date.now()
+    return report
+  } catch (err: any) {
+    const report: SandboxImagesReport = {
+      dockerAvailable: false,
+      allPresent: false,
+      missingImages: REQUIRED_SANDBOX_IMAGES.map(r => r.name),
+      images: REQUIRED_SANDBOX_IMAGES.map(req => {
+        const [repo, tag = 'latest'] = req.name.split(':')
+        return {
+          name: req.name,
+          repository: repo,
+          tag,
+          role: req.role,
+          present: false,
+        }
+      }),
+      checkedAt: new Date().toISOString(),
+      error: String(
+        err?.stderr || err?.message || 'Docker daemon is not running or docker CLI is not found'
+      ).trim(),
+    }
+    cachedSandboxImages = report
+    lastSandboxImagesRefreshAt = Date.now()
+    return report
+  }
+}
+
+export async function refreshSandboxImagesCache(
+  force = false,
+  homeDir = os.homedir()
+): Promise<SandboxImagesReport> {
+  const now = Date.now()
+  if (sandboxImagesRefreshInFlight) return sandboxImagesRefreshInFlight
+  if (!force && now - lastSandboxImagesRefreshAt < 3000) {
+    return cachedSandboxImages
+  }
+
+  const dockerBin = resolveDockerBinary(homeDir)
+  const env = getAugmentedEnv(homeDir)
+  sandboxImagesRefreshInFlight = new Promise<SandboxImagesReport>(resolve => {
+    execFile(
+      dockerBin,
+      ['images', '--format', '{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}'],
+      { timeout: 3500, env },
+      (err, stdout, stderr) => {
+        sandboxImagesRefreshInFlight = null
+        if (err || typeof stdout !== 'string') {
+          const report: SandboxImagesReport = {
+            dockerAvailable: false,
+            allPresent: false,
+            missingImages: REQUIRED_SANDBOX_IMAGES.map(r => r.name),
+            images: REQUIRED_SANDBOX_IMAGES.map(req => {
+              const [repo, tag = 'latest'] = req.name.split(':')
+              return {
+                name: req.name,
+                repository: repo,
+                tag,
+                role: req.role,
+                present: false,
+              }
+            }),
+            checkedAt: new Date().toISOString(),
+            error: String(stderr || err?.message || 'Docker daemon is not running').trim(),
+          }
+          cachedSandboxImages = report
+          lastSandboxImagesRefreshAt = Date.now()
+          resolve(report)
+          return
+        }
+        const existing = parseDockerImagesOutput(stdout)
+        const items: SandboxImageItem[] = REQUIRED_SANDBOX_IMAGES.map(req => {
+          const [repo, tag = 'latest'] = req.name.split(':')
+          const info = existing.get(req.name)
+          return {
+            name: req.name,
+            repository: repo,
+            tag,
+            role: req.role,
+            present: Boolean(info),
+            size: info?.size,
+            createdAt: info?.createdAt,
+          }
+        })
+        const missing = items.filter(it => !it.present).map(it => it.name)
+        const report: SandboxImagesReport = {
+          dockerAvailable: true,
+          allPresent: missing.length === 0,
+          missingImages: missing,
+          images: items,
+          checkedAt: new Date().toISOString(),
+        }
+        cachedSandboxImages = report
+        lastSandboxImagesRefreshAt = Date.now()
+        resolve(report)
+      }
+    )
+  })
+  return sandboxImagesRefreshInFlight
+}
+
+export function getSandboxImagesReport(homeDir = os.homedir()): SandboxImagesReport {
+  void refreshSandboxImagesCache(false, homeDir)
+  return cachedSandboxImages
 }
 
 export function parseSandboxListOutput(out: string): ActiveSandboxInfo[] {
@@ -384,43 +577,27 @@ export async function runSandboxDoctor(homeDir = os.homedir()): Promise<SandboxD
   }
 
   // 5. Required Docker sandbox images
-  const expectedImages = [
-    'openshell-base:latest',
-    'openshell-codex:latest',
-    'openshell-claude:latest',
-    'openshell-antigravity:latest',
-  ]
-  const dockerBin = resolveDockerBinary(homeDir)
-  try {
-    const dockerOut = execFileSync(dockerBin, ['images', '--format', '{{.Repository}}:{{.Tag}}'], {
-      encoding: 'utf8',
-      timeout: 4000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-    })
-    const existingImages = new Set(dockerOut.split('\n').map(s => s.trim()).filter(Boolean))
-    const missingImages = expectedImages.filter(img => !existingImages.has(img))
-    if (missingImages.length === 0) {
-      checks.push({
-        id: 'docker-images',
-        label: 'Docker Sandbox Images',
-        status: 'pass',
-        detail: `All required agent images present (${expectedImages.join(', ')})`,
-      })
-    } else {
-      checks.push({
-        id: 'docker-images',
-        label: 'Docker Sandbox Images',
-        status: 'fail',
-        detail: `Missing: ${missingImages.join(', ')} (run ./install.sh to build)`,
-      })
-    }
-  } catch (err: any) {
+  const imagesReport = inspectSandboxImagesSync(homeDir)
+  if (!imagesReport.dockerAvailable) {
     checks.push({
       id: 'docker-images',
       label: 'Docker Sandbox Images',
       status: 'warn',
-      detail: `Could not verify Docker images: ${String(err?.message || err).trim()}`,
+      detail: `Could not verify Docker images: ${imagesReport.error || 'Docker daemon not running'}`,
+    })
+  } else if (imagesReport.allPresent) {
+    checks.push({
+      id: 'docker-images',
+      label: 'Docker Sandbox Images',
+      status: 'pass',
+      detail: `All required agent images present (${imagesReport.images.map(i => `${i.name}${i.size ? ` [${i.size}]` : ''}`).join(', ')})`,
+    })
+  } else {
+    checks.push({
+      id: 'docker-images',
+      label: 'Docker Sandbox Images',
+      status: 'fail',
+      detail: `Missing: ${imagesReport.missingImages.join(', ')} (run ./install.sh to build)`,
     })
   }
 

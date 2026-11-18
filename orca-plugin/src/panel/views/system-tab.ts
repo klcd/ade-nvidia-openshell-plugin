@@ -201,6 +201,62 @@ export function renderSystemTab(): string {
     ${docChecksHtml}
   `
 
+  const imgReport = report.sandboxImages
+  const imagesHtml = imgReport
+    ? (() => {
+        const rows = (imgReport.images || [])
+          .map(img => {
+            const dot = img.present ? 'rw' : 'deny'
+            const badgeClass = img.present ? 'allow' : 'deny'
+            const statusText = img.present ? 'READY' : 'MISSING'
+            const sizeHtml = img.size
+              ? `<span class="source-pill" style="font-size:10px;">${escapeHtml(img.size)}</span>`
+              : ''
+            const tooltip = `${img.name}\n${img.role}\nStatus: ${statusText}${img.size ? ` (${img.size})` : ''}${img.createdAt ? `\nCreated: ${img.createdAt}` : ''}`
+            return `
+            <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="access-dot ${dot}" title="${img.present ? 'Installed' : 'Missing'}"></span>
+                <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(img.name)}</span>
+                  <span class="sub" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(img.role)}</span>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                ${sizeHtml}
+                <span class="badge ${badgeClass}">${statusText}</span>
+              </div>
+            </div>
+          `
+          })
+          .join('')
+
+        const missingAlert = !imgReport.dockerAvailable
+          ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);flex-direction:column;align-items:flex-start;gap:4px;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span class="access-dot deny"></span>
+                <strong style="color:var(--danger);font-size:11.5px;">Docker Daemon Not Reachable</strong>
+              </div>
+              <span class="sub" style="color:var(--fg);">${escapeHtml(imgReport.error || 'Cannot communicate with Docker. Ensure Docker is running.')}</span>
+            </div>`
+          : !imgReport.allPresent
+            ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+                  <strong style="color:var(--danger);font-size:11.5px;">Missing Required Sandbox Image(s)</strong>
+                  <span class="sub">Run <code class="mono">./install.sh</code> in the repository root to build required base and agent images.</span>
+                </div>
+                <button class="copy-btn primary" data-copy="./install.sh" title="Copy install command to clipboard">Copy ./install.sh</button>
+              </div>`
+            : ''
+
+        return `${missingAlert}${rows}`
+      })()
+    : `<div class="sub">No sandbox container image status available.</div>`
+
+  const imagesPresentCount = imgReport ? imgReport.images.filter(i => i.present).length : 0
+  const imagesTotalCount = imgReport?.images?.length || 4
+  const imagesFoldDot = imgReport?.allPresent ? 'rw' : 'deny'
+
   return `
     <details class="app-fold" data-section="sys-sb" open>
       <summary>
@@ -216,6 +272,20 @@ export function renderSystemTab(): string {
         ${defaultModeControlHtml}
         ${idleControlHtml}
         ${doctorControlHtml}
+      </div>
+    </details>
+
+    <details class="app-fold" data-section="sys-images" ${panelState.openSections.has('sys-images') || !panelState.openSections.has('sys-images-closed') ? 'open' : ''}>
+      <summary>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="fold-chevron">&#9654;</span>
+          <span class="access-dot ${imagesFoldDot}"></span>
+          <span>Sandbox Container Images (${imagesPresentCount}/${imagesTotalCount})</span>
+        </div>
+        <span class="source-pill">&#8984; docker</span>
+      </summary>
+      <div class="app-fold-body">
+        ${imagesHtml}
       </div>
     </details>
 

@@ -128,12 +128,32 @@ export interface SandboxModeState {
   inheritedFrom: string | null
 }
 
+export interface SandboxImageItem {
+  name: string
+  repository: string
+  tag: string
+  role: string
+  present: boolean
+  size?: string
+  createdAt?: string
+}
+
+export interface SandboxImagesReport {
+  dockerAvailable: boolean
+  allPresent: boolean
+  missingImages: string[]
+  images: SandboxImageItem[]
+  checkedAt: string
+  error?: string
+}
+
 export interface PolicyInspectionReport {
   generatedAt: string
   sandboxEnabled: boolean
   defaultSandboxEnabled: boolean
   sandboxInheritedFrom: string | null
   sandboxIdleTimeoutSeconds: number
+  sandboxImages: SandboxImagesReport
   selectedWorkspace: WorkspaceEntry
   currentAgent: 'claude' | 'codex' | 'antigravity'
   activeAgentSessions: ActiveAgentSessionInfo[]

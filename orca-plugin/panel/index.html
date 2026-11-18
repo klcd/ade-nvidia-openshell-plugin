@@ -506,6 +506,47 @@ details.egress-fold[open] > summary .fold-chevron {
   color: var(--fg);
   font-size: 11px;
 }
+.image-alarm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--danger-bg);
+  border: 1px solid rgba(248, 81, 73, 0.45);
+  color: var(--fg);
+  font-size: 11px;
+}
+.image-alarm-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.image-alarm-header .alarm-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.image-alarm-header strong {
+  font-weight: 600;
+  font-size: 11.5px;
+  color: var(--danger);
+  flex: 1;
+}
+.image-alarm-desc {
+  font-size: 11px;
+  color: var(--muted-fg);
+  line-height: 1.4;
+}
+.image-alarm-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+button.small {
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+}
 </style>
 </head>
 <body>
@@ -534,6 +575,19 @@ details.egress-fold[open] > summary .fold-chevron {
     <div id="bypassNotice" class="bypass-notice" style="display:none;">
       <span class="access-dot l7" title="Host Mode"></span>
       <span id="bypassNoticeText">Sandboxing deactivated for this worktree &mdash; new agent tabs &amp; chat commands run directly on host.</span>
+    </div>
+    <div id="imageAlarmNotice" class="image-alarm" style="display:none;">
+      <div class="image-alarm-header">
+        <span class="alarm-icon">⚠️</span>
+        <strong id="imageAlarmTitle">Required Sandbox Images Missing</strong>
+        <span id="imageAlarmCountBadge" class="badge deny">0/4</span>
+      </div>
+      <div id="imageAlarmDesc" class="image-alarm-desc">
+        One or more required container images are not installed in Docker.
+      </div>
+      <div class="image-alarm-actions">
+        <button id="copyInstallBtn" class="small primary" title="Copy repository build command to clipboard" data-copy="./install.sh">Copy ./install.sh</button>
+      </div>
     </div>
     <div id="contextBanner" class="grid-2" style="margin-top:2px;">
       <div class="stat-box" id="projectStatBox" style="flex-direction:row;justify-content:space-between;align-items:center;padding:7px 10px;">
@@ -568,7 +622,7 @@ details.egress-fold[open] > summary .fold-chevron {
 
   <div class="tabs">
     <button class="tab active" data-tab="egress">Sandbox Egress (<span id="egressCount">0</span>)</button>
-    <button class="tab" data-tab="system">Sandbox System</button>
+    <button class="tab" data-tab="system">Sandbox System <span id="systemAlarmBadge" class="badge deny" style="display:none;margin-left:4px;padding:1px 5px;font-size:10px;">!</span></button>
   </div>
 
   <div id="tabContent"></div>
@@ -919,6 +973,48 @@ details.egress-fold[open] > summary .fold-chevron {
     </div>
     ${docChecksHtml}
   `;
+    const imgReport = report.sandboxImages;
+    const imagesHtml = imgReport ? (() => {
+      const rows = (imgReport.images || []).map((img) => {
+        const dot = img.present ? "rw" : "deny";
+        const badgeClass = img.present ? "allow" : "deny";
+        const statusText = img.present ? "READY" : "MISSING";
+        const sizeHtml = img.size ? `<span class="source-pill" style="font-size:10px;">${escapeHtml(img.size)}</span>` : "";
+        const tooltip = `${img.name}\n${img.role}\nStatus: ${statusText}${img.size ? ` (${img.size})` : ""}${img.createdAt ? `\nCreated: ${img.createdAt}` : ""}`;
+        return `
+            <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="access-dot ${dot}" title="${img.present ? "Installed" : "Missing"}"></span>
+                <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(img.name)}</span>
+                  <span class="sub" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(img.role)}</span>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                ${sizeHtml}
+                <span class="badge ${badgeClass}">${statusText}</span>
+              </div>
+            </div>
+          `;
+      }).join("");
+      const missingAlert = !imgReport.dockerAvailable ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);flex-direction:column;align-items:flex-start;gap:4px;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span class="access-dot deny"></span>
+                <strong style="color:var(--danger);font-size:11.5px;">Docker Daemon Not Reachable</strong>
+              </div>
+              <span class="sub" style="color:var(--fg);">${escapeHtml(imgReport.error || "Cannot communicate with Docker. Ensure Docker is running.")}</span>
+            </div>` : !imgReport.allPresent ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+                  <strong style="color:var(--danger);font-size:11.5px;">Missing Required Sandbox Image(s)</strong>
+                  <span class="sub">Run <code class="mono">./install.sh</code> in the repository root to build required base and agent images.</span>
+                </div>
+                <button class="copy-btn primary" data-copy="./install.sh" title="Copy install command to clipboard">Copy ./install.sh</button>
+              </div>` : "";
+      return `${missingAlert}${rows}`;
+    })() : `<div class="sub">No sandbox container image status available.</div>`;
+    const imagesPresentCount = imgReport ? imgReport.images.filter((i) => i.present).length : 0;
+    const imagesTotalCount = imgReport?.images?.length || 4;
+    const imagesFoldDot = imgReport?.allPresent ? "rw" : "deny";
     return `
     <details class="app-fold" data-section="sys-sb" open>
       <summary>
@@ -934,6 +1030,20 @@ details.egress-fold[open] > summary .fold-chevron {
         ${defaultModeControlHtml}
         ${idleControlHtml}
         ${doctorControlHtml}
+      </div>
+    </details>
+
+    <details class="app-fold" data-section="sys-images" ${panelState.openSections.has("sys-images") || !panelState.openSections.has("sys-images-closed") ? "open" : ""}>
+      <summary>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="fold-chevron">&#9654;</span>
+          <span class="access-dot ${imagesFoldDot}"></span>
+          <span>Sandbox Container Images (${imagesPresentCount}/${imagesTotalCount})</span>
+        </div>
+        <span class="source-pill">&#8984; docker</span>
+      </summary>
+      <div class="app-fold-body">
+        ${imagesHtml}
       </div>
     </details>
 
@@ -985,6 +1095,9 @@ details.egress-fold[open] > summary .fold-chevron {
     const isPausedSb = Boolean(currentSb && /stopped/i.test(currentSb.phase || ""));
     const runningCount = currentSb && !isPausedSb ? 1 : 0;
     const pausedCount = currentSb && isPausedSb ? 1 : 0;
+    const imgReport = report.sandboxImages;
+    const missingImages = imgReport?.missingImages || [];
+    const hasImageAlarm = Boolean(sbEnabled && imgReport && (!imgReport.dockerAvailable || !imgReport.allPresent));
     const badge = document.getElementById("sandboxBadge");
     if (badge && !panelState.togglingSandbox) {
       if (!sbEnabled) {
@@ -999,6 +1112,10 @@ details.egress-fold[open] > summary .fold-chevron {
         badge.className = "badge neutral";
         badge.textContent = "Paused";
         badge.title = `Current tab sandbox: ${currentSb.name} (Paused)`;
+      } else if (hasImageAlarm) {
+        badge.className = "badge deny";
+        badge.textContent = !imgReport.dockerAvailable ? "Docker Down" : "Images Missing";
+        badge.title = !imgReport.dockerAvailable ? "Docker daemon is not running or docker CLI is not found" : `Missing ${missingImages.length} required sandbox container image(s): ${missingImages.join(", ")}`;
       } else {
         badge.className = "badge neutral";
         badge.textContent = "Enforced";
@@ -1025,6 +1142,40 @@ details.egress-fold[open] > summary .fold-chevron {
     }
     if (bypassNoticeText && !sbEnabled) {
       bypassNoticeText.textContent = inheritedFrom ? `Sandboxing deactivated for ${ws.name} (inherited from ${parentLabel}) \u2014 new agent tabs & chat commands run directly on host.` : `Sandboxing deactivated for ${ws.name} \u2014 new agent tabs & chat commands run directly on host.`;
+    }
+    const imageAlarmNotice = document.getElementById("imageAlarmNotice");
+    const imageAlarmTitle = document.getElementById("imageAlarmTitle");
+    const imageAlarmDesc = document.getElementById("imageAlarmDesc");
+    const imageAlarmCountBadge = document.getElementById("imageAlarmCountBadge");
+    const systemAlarmBadge = document.getElementById("systemAlarmBadge");
+    if (imageAlarmNotice) {
+      imageAlarmNotice.style.display = hasImageAlarm ? "flex" : "none";
+    }
+    if (hasImageAlarm) {
+      if (!imgReport.dockerAvailable) {
+        if (imageAlarmTitle)
+          imageAlarmTitle.textContent = "Docker Daemon Unavailable";
+        if (imageAlarmDesc) {
+          imageAlarmDesc.textContent = imgReport.error || "Docker daemon is not running or docker CLI is not found. Start Docker to use sandbox mode.";
+        }
+        if (imageAlarmCountBadge) {
+          imageAlarmCountBadge.textContent = "DOWN";
+        }
+      } else {
+        if (imageAlarmTitle)
+          imageAlarmTitle.textContent = "Required Sandbox Container Images Missing";
+        if (imageAlarmDesc) {
+          imageAlarmDesc.textContent = `Missing ${missingImages.length} required container image(s): ${missingImages.join(", ")}. Sandbox mode cannot start containers until built.`;
+        }
+        if (imageAlarmCountBadge) {
+          const presentCount = (imgReport.images || []).filter((i) => i.present).length;
+          const totalCount = imgReport.images?.length || 4;
+          imageAlarmCountBadge.textContent = `${presentCount}/${totalCount}`;
+        }
+      }
+    }
+    if (systemAlarmBadge) {
+      systemAlarmBadge.style.display = hasImageAlarm ? "inline-flex" : "none";
     }
     const projLabel = document.getElementById("projectLabel");
     if (projLabel)

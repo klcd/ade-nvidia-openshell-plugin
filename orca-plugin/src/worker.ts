@@ -138,17 +138,39 @@ export default function activate(orca: OrcaWorkerApi): void {
       const isRunning = Boolean(currentSb && !isPaused)
       const egressCount = report.agents[0]?.endpoints?.length || 0
       const enabled = report.sandboxEnabled !== false
-      const text = !enabled ? 'Hostmode' : 'Sandbox'
-      const tone = !enabled ? 'warning' : isRunning ? 'accent' : 'success'
-      const tooltip = !enabled
-        ? `Hostmode (${report.selectedWorkspace.name}) — Running directly on the host. Click to work inside an OpenShell sandbox.`
-        : currentSb
-          ? `Working inside OpenShell sandbox ${currentSb.name} (${report.currentAgent}, ${isPaused ? 'Paused' : currentSb.phase}, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to work directly on the host (Hostmode).`
-          : `Working inside an OpenShell sandbox (${report.currentAgent}, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to work directly on the host (Hostmode).`
+      const imgReport = report.sandboxImages
+      const missingImages = imgReport?.missingImages || []
+      const hasImageAlarm =
+        enabled && Boolean(imgReport && (!imgReport.dockerAvailable || !imgReport.allPresent))
+
+      const text = !enabled ? 'Hostmode' : hasImageAlarm ? 'Sandbox ⚠️' : 'Sandbox'
+      const tone = !enabled
+        ? 'warning'
+        : hasImageAlarm
+          ? 'warning'
+          : isRunning
+            ? 'accent'
+            : 'success'
+      const icon = hasImageAlarm ? 'alert-triangle' : 'layers'
+
+      let tooltip: string
+      if (!enabled) {
+        tooltip = `Hostmode (${report.selectedWorkspace.name}) — Running directly on the host. Click to work inside an OpenShell sandbox.`
+      } else if (hasImageAlarm) {
+        if (!imgReport?.dockerAvailable) {
+          tooltip = `⚠️ Docker daemon unavailable: ${imgReport?.error || 'Docker not running'} — Sandbox mode cannot start containers. Click to switch to Hostmode.`
+        } else {
+          tooltip = `⚠️ Missing required sandbox image(s): ${missingImages.join(', ')} — Run ./install.sh in repository to build. Click to switch to Hostmode.`
+        }
+      } else if (currentSb) {
+        tooltip = `Working inside OpenShell sandbox ${currentSb.name} (${report.currentAgent}, ${isPaused ? 'Paused' : currentSb.phase}, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to work directly on the host (Hostmode).`
+      } else {
+        tooltip = `Working inside an OpenShell sandbox (${report.currentAgent}, ${egressCount} egress hosts) — Project: ${report.selectedWorkspace.name}. Click to work directly on the host (Hostmode).`
+      }
       void orca.host.call('statusBar.update', {
         id: 'openshell-status',
         text,
-        icon: 'layers',
+        icon,
         tone,
         tooltip,
         visible: true,

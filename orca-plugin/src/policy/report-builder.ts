@@ -22,7 +22,12 @@ import {
   parseOpenShellPolicyFile,
 } from '../parsers/openshell-policy.ts'
 import { inspectNativeSync, loadPermissionGroups } from '../parsers/permission-yaml.ts'
-import { listActiveSandboxes, refreshActiveSandboxesCache } from '../sandbox/sandbox-control.ts'
+import {
+  getSandboxImagesReport,
+  listActiveSandboxes,
+  refreshActiveSandboxesCache,
+  refreshSandboxImagesCache,
+} from '../sandbox/sandbox-control.ts'
 import {
   getDefaultSandboxEnabled,
   getSandboxIdleTimeoutSeconds,
@@ -42,6 +47,7 @@ export async function buildPolicyReportAsync(options?: {
   await Promise.all([
     refreshOrcaContextCache(options?.homeDir),
     refreshActiveSandboxesCache(),
+    refreshSandboxImagesCache(false, options?.homeDir),
   ])
   return buildPolicyReport(options)
 }
@@ -545,6 +551,7 @@ export function buildPolicyReport(options?: {
     defaultSandboxEnabled,
     sandboxInheritedFrom: sandboxMode.inheritedFrom,
     sandboxIdleTimeoutSeconds,
+    sandboxImages: getSandboxImagesReport(homeDir),
     selectedWorkspace,
     currentAgent,
     activeAgentSessions: context.activeAgentSessions,
