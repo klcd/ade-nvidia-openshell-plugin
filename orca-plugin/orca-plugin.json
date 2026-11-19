@@ -3,15 +3,25 @@
   "id": "openshell-bridge",
   "name": "OpenShell Bridge",
   "version": "0.3.7",
-  "description": "Route Orca agent launches through NVIDIA OpenShell disposable Linux sandboxes. Includes 1-click worktree sandbox toggling, L7 egress approval popups, and an interactive policy inspector panel.",
+  "description": "Zero-leak autonomous coding in Orca powered by NVIDIA OpenShell. Confines Claude Code, OpenAI Codex, and Antigravity inside isolated Linux sandboxes (Landlock filesystem locks, deny-by-default L7 network egress, and proxy-injected credentials) so nothing from your host machine leaks—whether OpenShell provisions sandboxes locally via Docker or remotely on Kubernetes/K3s.",
   "homepage": "https://github.com/klcd/ade-nvidia-openshell-plugin",
   "repository": "https://github.com/klcd/ade-nvidia-openshell-plugin",
   "license": "MIT",
   "icon": "assets/icon.png",
+  "cover": {
+    "path": "assets/cover.jpg",
+    "alt": "OpenShell Bridge for Orca connecting a zero-leak Orca host through NVIDIA OpenShell to sandboxed agents on Docker or K3s"
+  },
   "screenshots": [
     {
-      "path": "assets/screenshot-policies.png",
-      "alt": "OpenShell Policies inspector panel with CLI command evaluator, Landlock permissions, and network egress rules"
+      "path": "assets/screenshot-architecture.jpg",
+      "alt": "Zero-leak isolation diagram: host files and secrets protected behind OpenShell Landlock, L7 egress proxy, and credential injection gates",
+      "caption": "Zero-leak boundary: host secrets stay outside the sandbox on both Docker and K3s"
+    },
+    {
+      "path": "assets/screenshot-panel-overview.png",
+      "alt": "Detailed view of the OpenShell Policies sidebar panel and bottom Orca status bar toggle",
+      "caption": "Per-worktree Sandbox/Host switch, allowed egress endpoints, container image health, and status bar indicator"
     }
   ],
   "engines": {

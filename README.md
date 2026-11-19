@@ -1,6 +1,27 @@
 # ADE NVIDIA OpenShell Plugin (`ade-nvidia-openshell-plugin`)
 
+![OpenShell Bridge for Orca](orca-plugin/assets/cover.jpg)
+
 Run **Claude Code**, **Google Antigravity**, and **OpenAI Codex** in disposable Linux sandboxes managed by **NVIDIA OpenShell**—both standalone and natively integrated with **Orca** (including Structured Chat Mode, Terminal Mode, L7 Egress Approval Popups, and in-sandbox worker orchestration).
+
+## Why OpenShell Bridge? Zero-Leak Coding on Your Own Machine
+
+When you code on your personal or work laptop in an agentic IDE like **Orca**, you want AI agents to be productive—reading code, running test suites, installing tools—**without trusting them with direct access to your computer**:
+
+- **Zero host leakage**: Your personal files, `~/.ssh` keys, cloud credentials, browser sessions, and unrelated repositories stay completely outside the agent's reach.
+- **No blind outbound traffic**: Every outbound connection is denied by default and mediated by an L7 HTTP proxy (`binary`, `host`, `port`, `method`, `path`) with interactive approval popups when an agent hits a new endpoint.
+- **Zero-effort sandbox provisioning**: Ideally, you shouldn't have to care *how* or *where* the sandbox is provisioned. **NVIDIA OpenShell** handles sandbox creation, kernel isolation, credential injection, and cleanup across **local Docker/Podman/MicroVMs** or a **remote Kubernetes/K3s cluster** (`openshell gateway select`), while this plugin weaves it seamlessly into Orca.
+
+### What NVIDIA OpenShell Is & Typical Use Cases
+
+[NVIDIA OpenShell](https://docs.nvidia.com/openshell/latest/about/overview) (an open-source CNCF Sandbox runtime for autonomous AI agents) solves the agent capability-vs-risk tradeoff by enforcing security **outside the agent process** across a **Gateway**, trusted **Supervisor**, and **Sandbox** boundary:
+
+- **Kernel-level isolation**: **Landlock** confines filesystem access strictly to the staged project worktree; **seccomp** and non-root execution with zero Linux capabilities block privilege escalation and intercept raw TCP/DNS calls.
+- **Provider credential isolation**: Real API keys remain outside the sandbox in OpenShell Providers; agents see only opaque placeholders, and the Supervisor injects secrets solely on approved requests.
+- **Formally verified policies**: OpenShell's policy prover flags risky policy changes (such as new credentialed hosts or HTTP methods) before they go live.
+- **Typical OpenShell use cases**: Secure local/remote coding agents (`Claude Code`, `Codex`, `OpenCode`, `GitHub Copilot CLI`), private enterprise development routed to self-hosted inference endpoints, version-controlled compliance policies, and portable environments across laptops and K3s clusters.
+
+![Zero-Leak Isolation Architecture](orca-plugin/assets/screenshot-architecture.jpg)
 
 For detailed Orca orchestration architecture and usage, see [`docs/ORCA_INTEGRATION.md`](docs/ORCA_INTEGRATION.md).
 
@@ -34,9 +55,62 @@ orca plugin install "$(pwd)/orca-plugin" --json
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-1. `./install.sh` builds the three container images (`openshell-claude:latest`, `openshell-antigravity:latest`, `openshell-codex:latest`), imports OpenShell provider profiles, and installs standalone wrappers.
+1. `./install.sh` builds the four local container images (`openshell-base:latest`, `openshell-claude:latest`, `openshell-antigravity:latest`, `openshell-codex:latest`), imports OpenShell provider profiles, and installs standalone wrappers.
 2. `./scripts/install-orca-host.sh` bundles and installs `agent-box` (`claude-box`, `agy-box`, `codex-box`), `orca-delegation`, `orca-delegation-shim.js`, the Orca policies under `~/.agents/orca-openshell-policies/`, and configures Orca's `agentCmdOverrides` so **both Chat Mode (`--surface chat`) and Terminal Mode (`--surface terminal`)** launch inside OpenShell sandboxes.
 3. `orca plugin install` activates the `agent.launch.before` hook, the `OpenShell: Enforced` status bar indicator, and the **OpenShell Policies** inspector panel in Orca.
+
+### Building & Extending Local Sandbox Dockerfiles
+
+All sandbox images are built locally from [`docker/`](docker/) using a layered `FROM openshell-base:latest` hierarchy:
+
+| Image Tag | Dockerfile | Contents |
+| :--- | :--- | :--- |
+| `openshell-base:latest` | [`docker/Dockerfile.base`](docker/Dockerfile.base) | `node:20-bookworm`, `build-essential`, `make`, `git`, `curl`, `ripgrep`, `jq`, `python3`/`pip`/`venv`, Go (`ARG GO_VERSION=1.26.2`), non-root `ubuntu` user, and `/home/ubuntu/.* -> /sandbox/.*` Landlock symlinks |
+| `openshell-claude:latest` | [`docker/Dockerfile.claude`](docker/Dockerfile.claude) | Inherits `openshell-base:latest`, adds `@anthropic-ai/claude-code` and [`docker/combine-skills.sh`](docker/combine-skills.sh) |
+| `openshell-codex:latest` | [`docker/Dockerfile.codex`](docker/Dockerfile.codex) | Inherits `openshell-base:latest`, adds `@openai/codex` |
+| `openshell-antigravity:latest` | [`docker/Dockerfile.antigravity`](docker/Dockerfile.antigravity) | Inherits `openshell-base:latest`, adds the Linux `agy` / `antigravity` CLI (`arm64` / `amd64`) |
+
+#### Rebuild all or individual images
+
+```sh
+# Recommended: rebuild all 4 images in order
+./install.sh --rebuild
+
+# Or build manually (openshell-base:latest MUST be built first)
+docker build --build-arg GO_VERSION=1.26.2 -t openshell-base:latest -f docker/Dockerfile.base docker
+docker build -t openshell-claude:latest -f docker/Dockerfile.claude docker
+docker build -t openshell-codex:latest -f docker/Dockerfile.codex docker
+docker build -t openshell-antigravity:latest -f docker/Dockerfile.antigravity docker
+```
+
+#### Extend with your own tools, languages, or packages
+
+1. **Extend the shared base (`docker/Dockerfile.base`)** if every agent (`claude`, `codex`, `antigravity`) should get the tool (for example Rust, `uv`, `pnpm`, `bun`, `gh`, or extra `apt` libraries). Add your install steps before `USER ubuntu`, then run `./install.sh --rebuild`.
+2. **Extend a single agent with an overlay `Dockerfile`** without touching tracked repo files—build from the base agent image and re-tag the result with the expected image name:
+
+   ```dockerfile
+   FROM openshell-claude:latest
+
+   USER root
+   RUN apt-get update && apt-get install -y --no-install-recommends \
+       gh postgresql-client \
+     && rm -rf /var/lib/apt/lists/*
+   RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+   USER ubuntu
+   WORKDIR /sandbox
+   CMD ["bash"]
+   ```
+
+   ```sh
+   docker build -t openshell-claude:latest -f Dockerfile.claude.local .
+   ```
+
+> [!IMPORTANT]
+> When customizing any sandbox Dockerfile, preserve three OpenShell contracts:
+> - **End with `USER ubuntu` and `WORKDIR /sandbox`**: OpenShell enforces non-root execution with zero Linux capabilities.
+> - **Install binaries in `/usr/local/bin` (read-only at runtime) and keep runtime writes in `/sandbox` or `/tmp`**: Landlock blocks runtime writes outside `/sandbox`, `/tmp`, and declared agent state paths.
+> - **Keep the expected tags (`openshell-base:latest`, `openshell-claude:latest`, `openshell-codex:latest`, `openshell-antigravity:latest`)**: `agent-box`, **OpenShell Doctor**, and **Sandbox Container Images** inspect those tags directly. If a newly added binary needs outbound network access, add its path and host rule in **OpenShell Policies → Sandbox Egress** (and import updated images into `containerd` / your registry when targeting remote K3s).
 
 ### Standalone usage
 
@@ -48,14 +122,15 @@ codex-box app-server
 
 ### Orca Chat Mode, Terminal Mode & Policy Inspector
 
+![OpenShell Policies Panel & Status Bar](orca-plugin/assets/screenshot-panel-overview.png)
+
 See [`orca-plugin/README.md`](orca-plugin/README.md) for the complete plugin behavior reference and [`docs/ORCA_INTEGRATION.md`](docs/ORCA_INTEGRATION.md) for orchestration details:
 
-- **1-Click Per-Worktree Sandbox Toggle (`On` ↔ `Off / Host Mode`)**: Click the **`OpenShell: Enforced (...)`** status bar item at the bottom of Orca (or the **Sandbox Mode** switch inside the **OpenShell Policies** panel) to toggle sandboxing for the active git worktree (`~/.agents/orca-openshell-policies/worktree-sandbox-mode.json`). Both Terminal Mode (`agent.launch.before`) and Chat Mode (`claude-box`, `codex-box`, `agent-box`) respect this per-worktree setting immediately.
-- **Interactive "Test CLI Command" Evaluator & Live Runner**: Enter any command in the **OpenShell Policies** panel to evaluate it against `DENY > ASK > ALLOW` permission rules, Landlock write paths, and L7 egress rules **and execute it live** inside the active worktree's OpenShell sandbox (or on the host when `Sandbox Mode` is `Off`), displaying exit code, duration, `stdout`, `stderr`, and 1-click L7 rule buttons if an outbound request was blocked.
-- **Three Compact Inspector Tabs with Opaque Hover Tooltips**:
-  - **CLI Commands**: Foldable application cards (`git`, `docker`, `kubectl`, `orca`, etc.) with compact inner rule rows (`allow` / `ask` / `deny` dot, command pattern, policy group pill) and instant hover tooltips showing the rule rationale, source YAML file, and synced agent configs.
+- **1-Click Per-Worktree Sandbox Toggle (`On` ↔ `Off / Host Mode`)**: Click the **`Sandbox`** / **`Hostmode`** status bar item at the bottom of Orca (or the **Sandbox** toggle inside the **OpenShell Policies** panel) to flip sandboxing for the active git worktree (`~/.agents/orca-openshell-policies/worktree-sandbox-mode.json`), complete with synchronized switching spinners. Both Terminal Mode (`agent.launch.before`) and Chat Mode (`claude-box`, `codex-box`, `agent-box`) respect this per-worktree setting immediately.
+- **Interactive "Test in Sandbox" Evaluator & Live Runner**: Enter any command in the **OpenShell Policies** panel to evaluate it against `DENY > ASK > ALLOW` permission rules, Landlock write paths, and L7 egress rules **and execute it live** inside the active worktree's OpenShell sandbox (or on the host when `Sandbox` is `Host`), displaying exit code, duration, `stdout`, `stderr`, and 1-click L7 rule buttons if an outbound request was blocked.
+- **Compact Inspector Tabs with Opaque Hover Tooltips**:
   - **Sandbox Egress**: Foldable HTTPS/L7 host cards with inner binary pills (`agy`, `claude`, `codex`, `curl`, `gh`) and HTTP `METHOD /path/**` sub-cards; hovering any inner pill or sub-card shows the container binary path, rationale, and source policy file. Includes `+ Add Egress Rule` for `Session`, `Project`, or `Global` scopes.
-  - **Sandbox System**: Active sandbox lifecycle controls (`Pause`, `Resume`, `Stop & Delete` with automatic pre-delete workspace download/sync), `OpenShell Doctor` health diagnostics, native `.claude` / `.codex` / `.gemini` policy sync status, and Landlock filesystem mounts.
+  - **Sandbox System**: Active sandbox lifecycle controls (`Pause`, `Resume`, `Delete` with automatic pre-delete workspace download/sync), **Sandbox Container Images** overview (`openshell-base`, `openshell-antigravity`, `openshell-claude`, `openshell-codex`) with missing-image alarms (`Sandbox ⚠️` in the status bar + top warning banner), **`OpenShell Doctor`** diagnostics, Landlock filesystem mounts, and credential placeholders.
 - **Zero Host Capabilities (`"capabilities": []`)**: `local.openshell-bridge` runs as a `trusted-worker` with zero requested Orca host capabilities (`pty`, `worktrees`, `agents`, `git`, `browser`, `storage`, `network`, and `shell` are all unrequested).
 - **Chat Mode (`surface: "chat"`)**:
   - **Claude & Codex**: Runs `claude-box` / `codex-box` with `ORCA_STRUCTURED_SESSION=1` over full-duplex SSH streaming (`openshell sandbox ssh-config`), rewrites host/container paths in real time, and merges workspace changes and session transcripts back to the host at the end of every turn.
