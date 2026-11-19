@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "openshell-bridge",
   "name": "OpenShell Bridge",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Zero-leak autonomous coding in Orca powered by NVIDIA OpenShell. Confines Claude Code, OpenAI Codex, and Antigravity inside isolated Linux sandboxes (Landlock filesystem locks, deny-by-default L7 network egress, and proxy-injected credentials) so nothing from your host machine leaks—whether OpenShell provisions sandboxes locally via Docker or remotely on Kubernetes/K3s.",
   "homepage": "https://github.com/klcd/ade-nvidia-openshell-plugin",
   "repository": "https://github.com/klcd/ade-nvidia-openshell-plugin",
