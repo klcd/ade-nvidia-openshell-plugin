@@ -57,7 +57,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 1. `./install.sh` builds the four local container images (`openshell-base:latest`, `openshell-claude:latest`, `openshell-antigravity:latest`, `openshell-codex:latest`), imports OpenShell provider profiles, and installs standalone wrappers.
 2. `./scripts/install-orca-host.sh` bundles and installs `agent-box` (`claude-box`, `agy-box`, `codex-box`), `orca-delegation`, `orca-delegation-shim.js`, the Orca policies under `~/.agents/orca-openshell-policies/`, and configures Orca's `agentCmdOverrides` so **both Chat Mode (`--surface chat`) and Terminal Mode (`--surface terminal`)** launch inside OpenShell sandboxes.
-3. `orca plugin install` activates the `agent.launch.before` hook, the `OpenShell: Enforced` status bar indicator, and the **OpenShell Policies** inspector panel in Orca.
+3. `orca plugin install` activates the `agent.launch.before` hook, the **`Sandbox`** / **`Hostmode`** status bar toggle, and the **OpenShell Policies** inspector panel in Orca.
 
 ### Building & Extending Local Sandbox Dockerfiles
 
@@ -126,10 +126,10 @@ codex-box app-server
 
 See [`orca-plugin/README.md`](orca-plugin/README.md) for the complete plugin behavior reference and [`docs/ORCA_INTEGRATION.md`](docs/ORCA_INTEGRATION.md) for orchestration details:
 
-- **1-Click Per-Worktree Sandbox Toggle (`On` ↔ `Off / Host Mode`)**: Click the **`Sandbox`** / **`Hostmode`** status bar item at the bottom of Orca (or the **Sandbox** toggle inside the **OpenShell Policies** panel) to flip sandboxing for the active git worktree (`~/.agents/orca-openshell-policies/worktree-sandbox-mode.json`), complete with synchronized switching spinners. Both Terminal Mode (`agent.launch.before`) and Chat Mode (`claude-box`, `codex-box`, `agent-box`) respect this per-worktree setting immediately.
+- **1-Click Per-Worktree Sandbox Toggle (`On` ↔ `Off / Host Mode`)**: Click the **`Sandbox`** / **`Hostmode`** status bar item at the bottom of Orca (or the **Sandbox** toggle inside the **OpenShell Policies** panel) to flip sandboxing for the active git worktree (`~/.config/orca-openshell/sandbox-mode.json`), complete with synchronized switching spinners. Both Terminal Mode (`agent.launch.before`) and Chat Mode (`claude-box`, `codex-box`, `agent-box`) respect this per-worktree setting immediately, and child worktrees inherit their parent worktree's sandbox state automatically.
 - **Interactive "Test in Sandbox" Evaluator & Live Runner**: Enter any command in the **OpenShell Policies** panel to evaluate it against `DENY > ASK > ALLOW` permission rules, Landlock write paths, and L7 egress rules **and execute it live** inside the active worktree's OpenShell sandbox (or on the host when `Sandbox` is `Host`), displaying exit code, duration, `stdout`, `stderr`, and 1-click L7 rule buttons if an outbound request was blocked.
 - **Compact Inspector Tabs with Opaque Hover Tooltips**:
-  - **Sandbox Egress**: Foldable HTTPS/L7 host cards with inner binary pills (`agy`, `claude`, `codex`, `curl`, `gh`) and HTTP `METHOD /path/**` sub-cards; hovering any inner pill or sub-card shows the container binary path, rationale, and source policy file. Includes `+ Add Egress Rule` for `Session`, `Project`, or `Global` scopes.
+  - **Sandbox Egress**: Foldable HTTPS/L7 host cards with inner binary pills (`agy`, `claude`, `codex`, `curl`, `gh`) and HTTP `METHOD /path/**` sub-cards; hovering any inner pill or sub-card shows the container binary path, rationale, and source policy file. Includes `+ Add Egress Rule` for `Session`, `Project`, or `Global` scopes, plus **`Temporary`** badges for live child-worktree subagent policies.
   - **Sandbox System**: Active sandbox lifecycle controls (`Pause`, `Resume`, `Delete` with automatic pre-delete workspace download/sync), **Sandbox Container Images** overview (`openshell-base`, `openshell-antigravity`, `openshell-claude`, `openshell-codex`) with missing-image alarms (`Sandbox ⚠️` in the status bar + top warning banner), **`OpenShell Doctor`** diagnostics, Landlock filesystem mounts, and credential placeholders.
 - **Zero Host Capabilities (`"capabilities": []`)**: `local.openshell-bridge` runs as a `trusted-worker` with zero requested Orca host capabilities (`pty`, `worktrees`, `agents`, `git`, `browser`, `storage`, `network`, and `shell` are all unrequested).
 - **Chat Mode (`surface: "chat"`)**:
@@ -139,7 +139,9 @@ See [`orca-plugin/README.md`](orca-plugin/README.md) for the complete plugin beh
 - **Terminal Mode (`surface: "terminal"`)**: Launching any supported agent in an Orca terminal (`orca agent launch --agent claude --surface terminal`) wraps the interactive TUI inside an OpenShell sandbox via the `local.openshell-bridge` launch hook.
 - **Remote K3s / Multi-Gateway Support**: Because workspace staging (`openshell sandbox create --upload`), file sync (`openshell sandbox download`), command execution (`openshell sandbox ssh-config`), and L7 policy updates (`openshell policy set`) all run over the `openshell` gateway API and SSH tunnels rather than local Docker bind-mounts, pointing `openshell gateway select <k3s-gateway>` at a remote K3s cluster runs sandboxes remotely without code changes.
 
-To allow a coordinator (in either Chat Mode or Terminal Mode) to spawn worker agents in their own isolated sandboxes:
+### Scoped Subagent Orchestration & Temporary Worktree Policies
+
+A sandboxed coordinator (in either **Chat Mode** or **Terminal Mode**) can act as an Orca orchestrator and spawn isolated subagent sandboxes with **per-subagent repository file scopes** and **LLM-authored temporary OpenShell L7 policies**:
 
 1. **Automatic Grant (Recommended)**:
    Set `ORCA_AUTO_GRANT_DELEGATION=1` in your environment or add `<project>/.agents/delegation.json`:
@@ -148,7 +150,10 @@ To allow a coordinator (in either Chat Mode or Terminal Mode) to spawn worker ag
      "autoGrant": true,
      "agents": ["claude", "antigravity", "codex"],
      "maxWorkers": 2,
-     "maxDepth": 1
+     "maxDepth": 1,
+     "allowNewWorktree": true,
+     "allowDynamicPolicies": true,
+     "allowedEgressHosts": ["api.github.com"]
    }
    ```
 2. **Manual Grant**:
@@ -158,21 +163,39 @@ To allow a coordinator (in either Chat Mode or Terminal Mode) to spawn worker ag
      --agents claude,antigravity,codex --max-workers 2 --max-depth 1
    ```
 
-Inside the coordinator sandbox, standard Orca orchestration commands work transparently via the shim:
-```sh
-orca orchestration worker-start --spec "Run tests and report status" --agent claude --worktree current --json
-orca orchestration worker-show --dispatch '<dispatch-id>' --json
-orca orchestration worker-read --dispatch '<dispatch-id>' --json
-orca orchestration check --peek --json
+Inside the coordinator sandbox, `/sandbox/.orca-delegate/bin/orca` transparently forwards `orca orchestration` commands over the host FIFO broker (the shim fixes caller identity automatically so `--from` / `--terminal` spoofing is refused):
 
-# Restrict a subagent to specific repository paths and/or author temporary OpenShell policies on a child worktree
-orca orchestration worker-start --spec "Implement module" --agent claude --worktree new-child --name feat-mod --read-paths '["docs"]' --write-paths '["src/feature"]' --json
-orca orchestration worker-start --spec "Fetch docs & review module" --agent codex --worktree new-child --policy-file ./worker-policy.json --json
+```sh
+# Read/write file subset isolation on current or new child worktree
+orca orchestration worker-start \
+  --spec "Implement module" \
+  --agent claude \
+  --worktree new-child \
+  --name feat-mod \
+  --read-paths '["docs"]' \
+  --write-paths '["src/feature"]' \
+  --json
+
+# Combine file subsets + LLM-authored temporary OpenShell L7 rules (YAML or JSON)
+orca orchestration worker-start \
+  --spec "Fetch GitHub zen and update allowed/status.txt" \
+  --agent claude \
+  --worktree new-child \
+  --name github-worker \
+  --policy-file /tmp/worker-policy.yaml \
+  --json
+
+orca orchestration worker-show --dispatch '<dispatch-id>' --json
+orca orchestration worker-read --dispatch '<dispatch-id>' --source auto --json
 ```
 
-When `--worktree new-child` is combined with `--policy-file` (JSON or YAML), the host validates the LLM-authored OpenShell policy, installs it temporarily into `<child-worktree>/.agents/policies/` (git-excluded) before starting the sandbox, displays those rules under **Temporary** in the **OpenShell Policies** panel, and removes the temporary policy automatically when the subagent tears down.
+How worktree-tied temporary OpenShell policies work end-to-end:
+- **Pre-sandbox worktree + policy setup**: With `--worktree new-child`, the host creates the child worktree via `orca worktree create`, validates the LLM-authored policy, installs `<child-worktree>/.agents/policies/.orca-openshell-temp-<id>.json` (git-excluded via `info/exclude`) **before** starting the child OpenShell sandbox, and surfaces those rules as **`Temporary`** in the **OpenShell Policies** panel.
+- **Physical read isolation & write-path enforcement**: Only `readPaths ∪ writePaths` are staged into `/sandbox` (excluded files such as `.env*`, `secret/`, and `.git` do not exist inside the child container), and `mergeWorkspace` discards any edits outside `writePaths` during host sync-back.
+- **L7 HTTP & security enforcement**: Outbound requests obey the temporary OpenShell policy (for example, `GET https://api.github.com/zen` returns `200`, `POST` returns `403`, and unapproved hosts stay blocked), while the host rejects Landlock downgrades, `outbound_token_redaction` tampering, private/metadata IPs, reserved provider hosts, and nested privilege escalation (`exit 77`).
+- **Automatic teardown cleanup**: Releasing/closing the worker (or rolling back a failed launch) deletes the child sandbox and removes `.orca-openshell-temp-<id>.json` and empty temporary directories automatically.
 
-See [Scoped subagent file & temporary OpenShell policies](docs/ORCA_INTEGRATION.md#scoped-subagent-file-policies---read-paths---write-paths---policy-file) for schema, security bounds, write filtering, and nested monotonic attenuation.
+See [Scoped subagent file & temporary OpenShell policies](docs/ORCA_INTEGRATION.md#scoped-subagent-file-policies---read-paths---write-paths---policy-file) for the complete schema and security model.
 
 ## How a session works
 
@@ -226,12 +249,15 @@ Set the provider command in Paseo's `~/.paseo/config.json` to the installed wrap
 
 ## Testing & Verification
 
+Verified against **Orca `1.4.259`** and **OpenShell `0.1.2`**:
+
 ```sh
-# Typecheck and unit tests
-node ts/node_modules/typescript/bin/tsc --noEmit -p ts/tsconfig.json
-node ts/node_modules/typescript/bin/tsc --noEmit -p orca-plugin/tsconfig.json
+# Rebuild the bundled panel UI + run TS bridge unit tests (34 tests / 8 files) + Orca plugin validation/tests/check (11 tests)
+bun ./scripts/build-orca-panel.ts
 (cd ts && bun test)
-orca plugin test orca-plugin --json
+orca plugin validate ./orca-plugin --json
+orca plugin test ./orca-plugin --json
+orca plugin check ./orca-plugin --json
 
 # Live OpenShell smoke tests
 ./scripts/smoke-bridge.sh claude

@@ -47,8 +47,8 @@ flowchart TB
       Hook["agent.launch.before Hook"]
     end
 
-    subgraph State["Host Policy & Session State (~/.agents/)"]
-      ModeFile["worktree-sandbox-mode.json<br/>(Per-worktree On/Off state)"]
+    subgraph State["Host Policy & Session State (~/.agents/ & ~/.config/orca-openshell/)"]
+      ModeFile["sandbox-mode.json<br/>(Per-worktree On/Off state)"]
       Perms["permissions/*.yml<br/>(Canonical CLI rules)"]
       L7Policies["orca-openshell-policies/*.json<br/>(Global / Project / Session L7 rules)"]
       Registry["sandbox-registry.json<br/>(Active session -> sandbox map)"]
@@ -80,18 +80,18 @@ Within `trusted-worker`, `local.openshell-bridge` declares **`"capabilities": []
 
 ## 2. Per-Worktree Sandbox Toggle (`On` vs `Off / Host Mode`)
 
-Every git worktree / workspace in Orca can independently run with OpenShell sandboxing **On (default)** or **Off (Host Mode)**.
+Every git worktree / workspace in Orca can independently run with OpenShell sandboxing **On** or **Off (Host Mode)** (child worktrees inherit their parent worktree's setting automatically).
 
 ### How to Toggle
-1. **1-Click Status Bar Toggle**: Click the **`OpenShell: Enforced (...)`** or **`OpenShell: Off (Host Mode)`** item in Orca's bottom status bar (`openshell.inspectPolicies`).
-   - Immediately flips sandboxing for the active worktree, displays a toast notification, updates the status bar badge, and live-refreshes the **OpenShell Policies** panel if open.
+1. **1-Click Status Bar Toggle**: Click the **`Sandbox`** or **`Hostmode`** item in Orca's bottom status bar (`openshell.inspectPolicies`).
+   - Immediately flips sandboxing for the active worktree, displays switching feedback, updates the status bar badge, and live-refreshes the **OpenShell Policies** panel if open.
 2. **Sidebar Panel Toggle**: Open the **OpenShell Policies** panel and click the toggle switch in the top **Sandbox Mode** card.
 
 ### What Happens in Each Mode
 | Surface | Sandbox Mode `ON` (`Enforced`) | Sandbox Mode `OFF` (`Host Mode`) |
 | --- | --- | --- |
-| **Terminal Mode (`surface: "terminal"`)** | `agent.launch.before` rewrites `claude`, `codex`, and `antigravity` launches to `claude-box`, `codex-box`, and `agy-box` inside an OpenShell container. | `agent.launch.before` returns `{}` (no rewrite); the agent launches directly on the macOS host. |
-| **Chat Mode (`surface: "chat"`)** | `claude-box`, `codex-box`, and `agent-box agy-chat-exec` stream tool calls into the worktree's OpenShell sandbox over SSH. | `agent-box` / wrappers detect the worktree entry in `~/.agents/orca-openshell-policies/worktree-sandbox-mode.json` and exec directly on the host. |
+| **Terminal Mode (`surface: "terminal"`)** | `agent.launch.before` rewrites `claude`, `codex`, and `antigravity` launches to `claude-box`, `codex-box`, and `agy-box` inside an OpenShell container. | `agent.launch.before` sets `OPENSHELL_SANDBOX_DISABLED=1`; the agent launches directly on the macOS host. |
+| **Chat Mode (`surface: "chat"`)** | `claude-box`, `codex-box`, and `agent-box agy-chat-exec` stream tool calls into the worktree's OpenShell sandbox over SSH. | `agent-box` / wrappers detect the worktree entry in `~/.config/orca-openshell/sandbox-mode.json` and exec directly on the host. |
 | **Test CLI Command (Panel)** | Evaluates policy AND runs the command inside the active worktree's OpenShell sandbox (`Sandbox: <name>` badge). | Evaluates policy AND runs the command in the worktree directory on your macOS host shell (`Host Mode` badge). |
 
 > [!NOTE]
@@ -244,9 +244,11 @@ docker build -t openshell-antigravity:latest -f docker/Dockerfile.antigravity do
 # Rebuild the bundled panel HTML (orca-plugin/panel/index.html)
 bun ./scripts/build-orca-panel.ts
 
-# Validate manifest and run the 11 unit/integration tests
+# Run TS unit tests (34 tests) and Orca plugin validation/tests/check (11 tests)
+(cd ts && bun test)
 orca plugin validate orca-plugin --json
 orca plugin test orca-plugin --json
+orca plugin check orca-plugin --json
 
 # Install / hot-reload into Orca
 orca plugin install "$(pwd)/orca-plugin" --json

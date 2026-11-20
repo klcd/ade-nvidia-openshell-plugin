@@ -1,6 +1,6 @@
 # ADE NVIDIA OpenShell Plugin — Orca Integration & Orchestration
 
-Verified with Orca 1.4.253 and OpenShell 0.1.2 on 2026-11-08. This document describes how `ade-nvidia-openshell-plugin` integrates NVIDIA OpenShell sandboxes with Orca Chat Mode, Terminal Mode, L7 Egress Approval Popups, and multi-agent worker orchestration.
+Verified with Orca 1.4.259 and OpenShell 0.1.2 on 2026-11-20. This document describes how `ade-nvidia-openshell-plugin` integrates NVIDIA OpenShell sandboxes with Orca Chat Mode, Terminal Mode, L7 Egress Approval Popups, and multi-agent worker orchestration.
 
 ## Runtime boundary
 
@@ -188,9 +188,9 @@ Orca supports two launch surfaces:
 
 ## Per-Worktree Sandbox Toggle, Live CLI Runner & Remote K3s Gateways
 
-- **Per-Worktree Sandbox Mode (`~/.agents/orca-openshell-policies/worktree-sandbox-mode.json`)**:
-  - Clicking the bottom status bar item (`OpenShell: Enforced (...)` / `OpenShell: Off (Host Mode)`) or toggling the **Sandbox Mode** switch in the **OpenShell Policies** panel flips sandboxing for the active git worktree and immediately refreshes both the status bar and the panel.
-  - When a worktree is set to `Off (Host Mode)`, `agent.launch.before` skips rewriting terminal launches (`return {}`) and `claude-box` / `codex-box` / `agent-box` pass Chat Mode executions directly to the host shell while keeping canonical `DENY` rules synced to native host agent configs.
+- **Per-Worktree Sandbox Mode (`~/.config/orca-openshell/sandbox-mode.json`)**:
+  - Clicking the bottom status bar item (**`Sandbox`** / **`Hostmode`** / **`Sandbox ⚠️`**) or toggling the **Sandbox Mode** switch in the **OpenShell Policies** panel flips sandboxing for the active git worktree (child worktrees inherit their parent worktree's setting automatically) and immediately refreshes both the status bar and the panel.
+  - When a worktree is set to `Hostmode`, `agent.launch.before` sets `OPENSHELL_SANDBOX_DISABLED=1` on terminal launches (unless a pending scoped delegation requires sandboxing) and `claude-box` / `codex-box` / `agent-box` pass Chat Mode executions directly to the host shell while keeping canonical `DENY` rules synced to native host agent configs.
 - **Interactive "Test CLI Command" Runner (`executeTestCliCommand`)**:
   - Evaluates any command against `DENY > ASK > ALLOW` permission rules, Landlock write paths, and L7 egress rules, then executes it inside the active worktree's OpenShell sandbox (`Sandbox: <name>`) or on the host shell (`Host Mode`), rendering `stdout`, `stderr`, exit code, duration, and 1-click L7 allow buttons when an outbound request is blocked.
 - **Zero-Capability Worker Plugin (`"capabilities": []`)**:
@@ -216,11 +216,11 @@ image.
 ## Verification
 
 ```sh
-node ts/node_modules/typescript/bin/tsc --noEmit -p ts/tsconfig.json
-node ts/node_modules/typescript/bin/tsc --noEmit -p orca-plugin/tsconfig.json
-bun test ts/src/*.test.ts
+bun ./scripts/build-orca-panel.ts
+(cd ts && bun test)
 orca plugin validate orca-plugin --json
 orca plugin test orca-plugin --json
+orca plugin check orca-plugin --json
 scripts/smoke-bridge.sh claude
 scripts/smoke-isolation.sh claude
 scripts/smoke-delegation-transport.sh claude
