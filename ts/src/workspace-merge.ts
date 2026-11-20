@@ -36,6 +36,8 @@ export function snapshotWorkspace(root: string): WorkspaceSnapshot {
 }
 
 function allowed(relative: string, writePaths: string[] | null): boolean {
+  const posixRel = relative.split(path.sep).join('/');
+  if (posixRel.startsWith('.agents/policies/.orca-openshell-temp-')) return false;
   return writePaths === null || writePaths.some(scope => relative === scope || relative.startsWith(`${scope}${path.sep}`));
 }
 

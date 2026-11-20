@@ -24,6 +24,18 @@ export interface ProcessPolicy {
   run_as_group?: string;
 }
 
+export interface NetworkL7Rule {
+  allow?: {
+    method?: string;
+    path?: string;
+  };
+}
+
+export interface NetworkL7DenyRule {
+  method?: string;
+  path?: string;
+}
+
 export interface NetworkEndpoint {
   host: string;
   port: number;
@@ -31,10 +43,13 @@ export interface NetworkEndpoint {
   access?: 'read-write' | 'read-only';
   enforcement?: 'enforce' | 'audit';
   request_body_credential_rewrite?: boolean;
+  rules?: NetworkL7Rule[];
+  deny_rules?: NetworkL7DenyRule[];
 }
 
 export interface NetworkPolicy {
   name?: string;
+  binaries?: Array<{ path: string }>;
   endpoints: NetworkEndpoint[];
 }
 

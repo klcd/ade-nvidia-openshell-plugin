@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { logDebug } from '../config.js';
+import { isRelativePathAllowed } from '../sandbox-scope.js';
 import { shellQuote, type AgyChatSandboxState } from './state.js';
 
 export function isSshControlAlive(state: AgyChatSandboxState): boolean {
@@ -52,7 +54,14 @@ export function syncHostDeltaToSandbox(state: AgyChatSandboxState, sessionDir: s
     ).trim();
 
     if (!findOut) return;
-    const files = findOut.split(/\r?\n/).filter(Boolean);
+    const files = findOut
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .filter(f => {
+        if (state.stagedUploadPaths === undefined || state.stagedUploadPaths === null) return true;
+        const rel = f.replace(/^\.\//, '');
+        return isRelativePathAllowed(rel, state.stagedUploadPaths);
+      });
     if (files.length === 0) return;
 
     const listFile = path.join(sessionDir, `host-delta-${process.pid}.list`);
@@ -91,6 +100,7 @@ export function syncHostDeltaToSandbox(state: AgyChatSandboxState, sessionDir: s
 }
 
 export function syncSandboxDeltaToHost(state: AgyChatSandboxState, sessionDir: string): void {
+  if (state.writePaths && state.writePaths.length === 0) return;
   const stampFile = path.join(sessionDir, 'host-sync.stamp');
   try {
     const remoteScript = [
@@ -113,11 +123,42 @@ export function syncSandboxDeltaToHost(state: AgyChatSandboxState, sessionDir: s
     );
 
     if (tarOut && tarOut.length > 0) {
-      execFileSync('tar', ['-xf', '-', '-C', state.projectRoot], {
-        input: tarOut,
-        stdio: ['pipe', 'ignore', 'ignore'],
-        timeout: 10000,
-      });
+      if (state.writePaths) {
+        const unpackDir = fs.mkdtempSync(path.join(os.tmpdir(), `agy-sync-scope-${process.pid}-`));
+        try {
+          execFileSync('tar', ['-xf', '-', '-C', unpackDir], {
+            input: tarOut,
+            stdio: ['pipe', 'ignore', 'ignore'],
+            timeout: 10000,
+          });
+          const copyAllowed = (dir: string, relBase = '') => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              if (entry.name === '.git') continue;
+              const rel = relBase ? path.join(relBase, entry.name) : entry.name;
+              const src = path.join(dir, entry.name);
+              const stat = fs.lstatSync(src);
+              if (stat.isSymbolicLink()) continue;
+              if (stat.isDirectory()) {
+                copyAllowed(src, rel);
+              } else if (stat.isFile() && isRelativePathAllowed(rel, state.writePaths!)) {
+                const dst = path.join(state.projectRoot, rel);
+                fs.mkdirSync(path.dirname(dst), { recursive: true });
+                fs.copyFileSync(src, dst);
+                fs.chmodSync(dst, stat.mode & 0o777);
+              }
+            }
+          };
+          copyAllowed(unpackDir);
+        } finally {
+          fs.rmSync(unpackDir, { recursive: true, force: true });
+        }
+      } else {
+        execFileSync('tar', ['-xf', '-', '-C', state.projectRoot], {
+          input: tarOut,
+          stdio: ['pipe', 'ignore', 'ignore'],
+          timeout: 10000,
+        });
+      }
       const now = new Date();
       if (fs.existsSync(stampFile)) {
         fs.utimesSync(stampFile, now, now);

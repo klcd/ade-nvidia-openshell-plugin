@@ -7,7 +7,7 @@ function option(args: string[], name: string): string | null {
   return i < 0 ? null : args[i + 1] || null;
 }
 function usage(): never {
-  console.error('Usage: orca-delegation grant --terminal <handle> --workspace <id:repo-id::path> [--agents codex,claude] [--max-workers 2] [--max-depth 1]');
+  console.error('Usage: orca-delegation grant --terminal <handle> --workspace <id:repo-id::path> [--agents codex,claude] [--max-workers 2] [--max-depth 1] [--no-new-worktree] [--no-dynamic-policies] [--allowed-egress-hosts host1,host2]');
   console.error('       orca-delegation revoke --terminal <handle>');
   process.exit(64);
 }
@@ -23,6 +23,12 @@ if (command === 'revoke') {
   const agents = (option(args, '--agents') || 'codex').split(',');
   const maxWorkers = Number(option(args, '--max-workers') || '2');
   const maxDepth = Number(option(args, '--max-depth') || '1');
+  const allowNewWorktree = !args.includes('--no-new-worktree');
+  const allowDynamicPolicies = !args.includes('--no-dynamic-policies');
+  const allowedEgressRaw = option(args, '--allowed-egress-hosts');
+  const allowedEgressHosts = allowedEgressRaw
+    ? allowedEgressRaw.split(',').map(s => s.trim()).filter(Boolean)
+    : undefined;
   // The workspace selector must resolve before a grant can be written.
   try {
     execFileSync('orca', ['worktree', 'show', '--worktree', workspace, '--json'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
@@ -30,6 +36,16 @@ if (command === 'revoke') {
   const listed = JSON.parse(execFileSync('orca', ['terminal', 'list', '--worktree', workspace, '--json'], { encoding: 'utf8', timeout: 15000 }));
   const selected = listed.result?.terminals?.find((item: { handle?: string }) => item.handle === terminal);
   if (!selected || !['codex', 'claude', 'antigravity', 'agy'].includes(selected.agentIdentity)) throw new Error(`Terminal ${terminal} is not a supported agent in ${workspace}`);
-  writeGrant({ terminal, workspace, agents: agents as ('codex' | 'claude' | 'antigravity' | 'agy')[], maxWorkers, maxDepth, depth: 0 });
+  writeGrant({
+    terminal,
+    workspace,
+    agents: agents as ('codex' | 'claude' | 'antigravity' | 'agy')[],
+    maxWorkers,
+    maxDepth,
+    depth: 0,
+    allowNewWorktree,
+    allowDynamicPolicies,
+    ...(allowedEgressHosts && allowedEgressHosts.length > 0 ? { allowedEgressHosts } : {}),
+  });
   console.log(`Granted ${terminal} access to ${workspace}: agents=${agents.join(',')} maxWorkers=${maxWorkers} maxDepth=${maxDepth}`);
 } else usage();

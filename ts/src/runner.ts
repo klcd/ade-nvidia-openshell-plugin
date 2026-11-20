@@ -18,8 +18,16 @@ import { OpenShellSandbox, spawnSandboxLifecycleWatchdog } from './sandbox.js';
 import { assertNoCredentialLeak, redactCredentialFiles } from './credential-security.js';
 import { isTurnCompleteFrame, rewriteJsonRpcPaths } from './protocols/jsonrpc.js';
 import { StreamSessionTracker } from './protocols/session-hibernation.js';
-import { applyWorkspaceWriteScope, getExtraProviderNames, getWorkspaceWritePaths } from './sandbox-scope.js';
-import { DelegationBroker, recordLaunch, forgetLaunch, revokeGrant, readGrant, writeGrant } from './delegation.js';
+import {
+  applyWorkspaceWriteScope,
+  getExtraProviderNames,
+  getStagedUploadPaths,
+  getWorkspaceWritePaths,
+  intersectWorkspacePaths,
+  isRelativePathAllowed,
+  stageScopedWorkspace,
+} from './sandbox-scope.js';
+import { DelegationBroker, claimPendingDelegationScope, cleanupWorkerScope, readWorkerScope, recordLaunch, forgetLaunch, revokeGrant, readGrant, writeGrant } from './delegation.js';
 import { CodexAdapter } from './agents/codex.js';
 import { ClaudeAdapter } from './agents/claude.js';
 import { mergeWorkspace, snapshotWorkspace } from './workspace-merge.js';
@@ -98,11 +106,26 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
 
   // 2. Discover workspace and check per-worktree (+ child workspace) sandbox toggle
   const projectRoot = detectProjectRoot(cwd);
-  if (!isSandboxModeEnabled(undefined, projectRoot, process.env.OPENSHELL_BRIDGE_WORKSPACE_ID)) {
+  const projectName = path.basename(projectRoot);
+  const terminalId =
+    process.env.OPENSHELL_BRIDGE_TERMINAL_ID ||
+    process.env.ORCA_TERMINAL_HANDLE ||
+    (process.env.ORCA_AGENT_SESSION_ID ? `structured-agent-session-${process.env.ORCA_AGENT_SESSION_ID}` : '');
+  const workspaceId = resolveOrcaWorkspaceId(projectRoot);
+  let workerScope = terminalId ? readWorkerScope(terminalId, workspaceId || undefined) : null;
+  if (!workerScope && terminalId && workspaceId) {
+    workerScope = claimPendingDelegationScope(terminalId, workspaceId, agent.type) ?? workerScope;
+  }
+  if (!workerScope && !isSandboxModeEnabled(undefined, projectRoot, process.env.OPENSHELL_BRIDGE_WORKSPACE_ID)) {
     return runHostPassthrough(agent.binaryName, rawArgs);
   }
-  const projectName = path.basename(projectRoot);
-  const workspaceWritePaths = getWorkspaceWritePaths(projectRoot);
+  const envWritePaths = getWorkspaceWritePaths(projectRoot);
+  const workspaceWritePaths = workerScope?.fileScope
+    ? (envWritePaths !== null
+        ? intersectWorkspacePaths(workerScope.fileScope.writePaths, envWritePaths, 'ORCA_SANDBOX_WRITE_PATHS')
+        : workerScope.fileScope.writePaths)
+    : envWritePaths;
+  const stagedUploadPaths = workerScope?.fileScope ? getStagedUploadPaths(workerScope.fileScope) : null;
   const structuredSession = process.env.ORCA_STRUCTURED_SESSION === '1';
   const orcaSession =
     process.env.OPENSHELL_BRIDGE_REQUIRED === '1' ||
@@ -113,21 +136,33 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   const prefix = prefixMap[agent.type] || 'sb';
   const sandboxName = generateSandboxName(prefix, projectName);
 
-  logDebug(`Starting ${agent.type} session for ${projectName} (sandbox: ${sandboxName}, structured: ${structuredSession})`);
+  logDebug(
+    `Starting ${agent.type} session for ${projectName} (sandbox: ${sandboxName}, structured: ${structuredSession}` +
+    `${stagedUploadPaths ? `, stagedPaths=${stagedUploadPaths.length}` : ''}${workspaceWritePaths ? `, writePaths=${workspaceWritePaths.length}` : ''})`
+  );
 
   // 3. Discover and merge policies
-  const defaultOrcaPolicy = path.join(os.homedir(), '.orca', 'plugins', 'openshell-bridge', 'policies', 'orca-standard.yaml');
+  const orcaPolicyDir = process.env.ORCA_OPENSHELL_POLICY_DIR || path.join(os.homedir(), '.agents', 'orca-openshell-policies');
+  const orcaPolicyCandidates = [
+    path.join(orcaPolicyDir, `${agent.type}.json`),
+    ...(agent.type === 'agy' ? [path.join(orcaPolicyDir, 'antigravity.json')] : []),
+    path.join(os.homedir(), '.orca', 'plugins', 'openshell-bridge', 'policies', 'orca-standard.yaml'),
+  ];
+  const defaultOrcaPolicy = orcaPolicyCandidates.find(p => fs.existsSync(p));
   const explicitPolicy =
     process.env.OPENSHELL_BRIDGE_POLICY_FILE ??
     process.env.ORCA_OPENSHELL_POLICY_FILE ??
-    (orcaSession && fs.existsSync(defaultOrcaPolicy) ? defaultOrcaPolicy : undefined);
+    (orcaSession ? defaultOrcaPolicy : undefined);
   const projectPolicy = mergePolicies([path.join(projectRoot, '.agents', 'policies')]);
-  const policy: OpenShellPolicy = explicitPolicy
+  let policy: OpenShellPolicy = explicitPolicy
     ? mergeTwoPolicies(
         parsePolicyFile(explicitPolicy) ?? (() => { throw new Error(`Cannot load OpenShell policy: ${explicitPolicy}`); })(),
         projectPolicy
       )
     : (discoverAndMergePolicies(projectRoot) ?? { version: 1 });
+  if (workerScope?.openshellPolicy) {
+    policy = mergeTwoPolicies(policy, workerScope.openshellPolicy);
+  }
   if (orcaSession) {
     if (!policy.filesystem_policy) {
       throw new Error('Orca OpenShell launches require a filesystem policy');
@@ -144,7 +179,7 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
     endpoints: { include: ['**'] },
   };
 
-  if (workspaceWritePaths !== null) {
+  if (!workerScope?.fileScope && workspaceWritePaths !== null) {
     const homePath = agent.type === 'claude' ? '.claude' : agent.type === 'codex' ? '.codex' : '.gemini';
     applyWorkspaceWriteScope(policy, projectName, homePath, workspaceWritePaths);
   }
@@ -153,7 +188,9 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   const extraProviders = getExtraProviderNames();
   const orcaCodex = agent.type === 'codex' && (process.env.OPENSHELL_BRIDGE_REQUIRED === '1' || structuredSession);
   const providerName = orcaCodex ? 'codex-orca' : agent.providerName;
-  assertNoCredentialLeak(projectRoot, credentials);
+  if (!stagedUploadPaths) {
+    assertNoCredentialLeak(projectRoot, credentials);
+  }
 
   const providers = [
     providerName,
@@ -161,11 +198,9 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   ];
 
   const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), `${agent.type}-stage-${process.pid}-`));
-  const terminalId =
-    process.env.OPENSHELL_BRIDGE_TERMINAL_ID ||
-    process.env.ORCA_TERMINAL_HANDLE ||
-    (process.env.ORCA_AGENT_SESSION_ID ? `structured-agent-session-${process.env.ORCA_AGENT_SESSION_ID}` : '');
-  const workspaceId = resolveOrcaWorkspaceId(projectRoot);
+  const scopedWorkspaceStageRoot = stagedUploadPaths
+    ? fs.mkdtempSync(path.join(os.tmpdir(), `${agent.type}-ws-scope-${process.pid}-`))
+    : null;
   const enableDelegation = Boolean(terminalId && workspaceId && orcaSession);
   let uploads: Array<{ source: string; destination: string }>;
   try {
@@ -186,16 +221,23 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
       ? Object.fromEntries(Object.entries(credentials).filter(([key]) => key !== 'CODEX_AUTH_ACCOUNT_ID'))
       : credentials;
     assertNoCredentialLeak(stageDir, stagedSecrets);
-    assertNoCredentialLeak(projectRoot, credentials);
 
     uploads = fs.readdirSync(stageDir).map(item => {
       const source = path.join(stageDir, item);
       const destination = fs.statSync(source).isDirectory() ? '/sandbox' : `/sandbox/${item}`;
       return { source, destination };
     });
-    uploads.push({ source: projectRoot, destination: '/sandbox' });
+    if (stagedUploadPaths && scopedWorkspaceStageRoot) {
+      const scopedDir = stageScopedWorkspace(projectRoot, projectName, scopedWorkspaceStageRoot, stagedUploadPaths);
+      assertNoCredentialLeak(scopedDir, credentials);
+      uploads.push({ source: scopedDir, destination: '/sandbox' });
+    } else {
+      assertNoCredentialLeak(projectRoot, credentials);
+      uploads.push({ source: projectRoot, destination: '/sandbox' });
+    }
   } catch (err) {
     fs.rmSync(stageDir, { recursive: true, force: true });
+    if (scopedWorkspaceStageRoot) fs.rmSync(scopedWorkspaceStageRoot, { recursive: true, force: true });
     throw err;
   }
 
@@ -241,6 +283,9 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
       policy,
       uploads
     );
+    if (scopedWorkspaceStageRoot) {
+      try { fs.rmSync(scopedWorkspaceStageRoot, { recursive: true, force: true }); } catch {}
+    }
     registerSandboxSession({
       sandboxName,
       agent: agent.type === 'agy' ? 'antigravity' : agent.type,
@@ -256,6 +301,7 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
     // OpenShell may retain an Error-phase sandbox after a failed create.
     new OpenShellSandbox(sandboxName).delete();
     fs.rmSync(stageDir, { recursive: true, force: true });
+    if (scopedWorkspaceStageRoot) fs.rmSync(scopedWorkspaceStageRoot, { recursive: true, force: true });
     return 1;
   }
 
@@ -267,7 +313,13 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
   // Spawn a lightweight parent-PID watchdog so that even if Orca's teardown
   // supervisor sends SIGKILL to this bridge process, the OpenShell sandbox is
   // guaranteed to be deleted once this process exits.
-  const watchdogPid = spawnSandboxLifecycleWatchdog(process.pid, sandboxName);
+  const watchdogPid = spawnSandboxLifecycleWatchdog(
+    process.pid,
+    sandboxName,
+    workerScope?.tempPolicyFilePath
+      ? { filePath: workerScope.tempPolicyFilePath, createdDirs: workerScope.tempPolicyCreatedDirs }
+      : null
+  );
 
   const syncSandboxToHost = async (): Promise<void> => {
     if (syncing) return;
@@ -310,12 +362,14 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
       const deletedRelatives: string[] = [];
 
       for (const [rel, entry] of currentHost.entries()) {
+        if (!isRelativePathAllowed(rel, stagedUploadPaths)) continue;
         const prev = baseline.get(rel);
         if (JSON.stringify(prev) !== JSON.stringify(entry) && entry.kind === 'file') {
           changedRelatives.push(rel);
         }
       }
       for (const rel of baseline.keys()) {
+        if (!isRelativePathAllowed(rel, stagedUploadPaths)) continue;
         if (!currentHost.has(rel)) {
           deletedRelatives.push(rel);
         }
@@ -366,6 +420,7 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
     if (dirtySinceLastSync && !sessionHibernated) {
       await syncSandboxToHost();
     }
+    cleanupWorkerScope(terminalId);
     sandbox.delete();
     if (watchdogPid) {
       try { process.kill(watchdogPid, 'SIGTERM'); } catch {}
@@ -391,6 +446,7 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
       unregisterSandboxSession(sandboxName);
       forgetLaunch(terminalId);
       revokeGrant(terminalId);
+      cleanupWorkerScope(terminalId);
       sandbox.delete(true);
     }
   });
@@ -401,7 +457,15 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
       recordLaunch(terminalId, workspaceId, sandboxName);
       if (!readGrant(terminalId, workspaceId)) {
         const configPath = path.join(projectRoot, '.agents', 'delegation.json');
-        let autoConfig: { autoGrant?: boolean; agents?: Array<'codex' | 'claude' | 'antigravity' | 'agy'>; maxWorkers?: number; maxDepth?: number } | null = null;
+        let autoConfig: {
+          autoGrant?: boolean;
+          agents?: Array<'codex' | 'claude' | 'antigravity' | 'agy'>;
+          maxWorkers?: number;
+          maxDepth?: number;
+          allowNewWorktree?: boolean;
+          allowDynamicPolicies?: boolean;
+          allowedEgressHosts?: string[];
+        } | null = null;
         if (fs.existsSync(configPath)) {
           try { autoConfig = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
         }
@@ -414,6 +478,9 @@ export async function runSandboxSession(agent: AgentAdapter, rawArgs: string[]):
               maxWorkers: autoConfig?.maxWorkers ?? 2,
               depth: 0,
               maxDepth: autoConfig?.maxDepth ?? 1,
+              ...(autoConfig?.allowNewWorktree !== undefined ? { allowNewWorktree: autoConfig.allowNewWorktree } : {}),
+              ...(autoConfig?.allowDynamicPolicies !== undefined ? { allowDynamicPolicies: autoConfig.allowDynamicPolicies } : {}),
+              ...(Array.isArray(autoConfig?.allowedEgressHosts) ? { allowedEgressHosts: autoConfig.allowedEgressHosts } : {}),
             });
             logDebug(`Auto-granted delegation for coordinator terminal ${terminalId} in ${workspaceId}`);
           } catch (err) {

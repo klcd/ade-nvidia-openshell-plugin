@@ -164,7 +164,15 @@ orca orchestration worker-start --spec "Run tests and report status" --agent cla
 orca orchestration worker-show --dispatch '<dispatch-id>' --json
 orca orchestration worker-read --dispatch '<dispatch-id>' --json
 orca orchestration check --peek --json
+
+# Restrict a subagent to specific repository paths and/or author temporary OpenShell policies on a child worktree
+orca orchestration worker-start --spec "Implement module" --agent claude --worktree new-child --name feat-mod --read-paths '["docs"]' --write-paths '["src/feature"]' --json
+orca orchestration worker-start --spec "Fetch docs & review module" --agent codex --worktree new-child --policy-file ./worker-policy.json --json
 ```
+
+When `--worktree new-child` is combined with `--policy-file` (JSON or YAML), the host validates the LLM-authored OpenShell policy, installs it temporarily into `<child-worktree>/.agents/policies/` (git-excluded) before starting the sandbox, displays those rules under **Temporary** in the **OpenShell Policies** panel, and removes the temporary policy automatically when the subagent tears down.
+
+See [Scoped subagent file & temporary OpenShell policies](docs/ORCA_INTEGRATION.md#scoped-subagent-file-policies---read-paths---write-paths---policy-file) for schema, security bounds, write filtering, and nested monotonic attenuation.
 
 ## How a session works
 

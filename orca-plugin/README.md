@@ -6,7 +6,7 @@
 > **For Orca Catalog Maintainers & Security Reviewers**:
 > Please refer to [`REVIEW_GUIDE.md`](REVIEW_GUIDE.md) for the 30-second audit summary, zero-network-call verification, subprocess boundary breakdown, and unit test reproduction instructions.
 
-`local.openshell-bridge` (`v0.3.8`, part of `ade-nvidia-openshell-plugin`) is an Orca `1.4.248+` plugin that integrates **NVIDIA OpenShell** disposable Linux sandboxes with Orca **Terminal Mode**, **Structured Chat Mode**, **L7 Network Egress Popups**, and an interactive **OpenShell Policies** sidebar inspector.
+`local.openshell-bridge` (`v0.4.0`, part of `ade-nvidia-openshell-plugin`) is an Orca `1.4.248+` plugin that integrates **NVIDIA OpenShell** disposable Linux sandboxes with Orca **Terminal Mode**, **Structured Chat Mode**, **Scoped Subagent Orchestration**, **L7 Network Egress Popups**, and an interactive **OpenShell Policies** sidebar inspector.
 
 ---
 
@@ -151,7 +151,38 @@ To keep the UI compact and scannable, rule rows avoid multi-line prose paragraph
 
 ---
 
-## 5. Using a Remote K3s OpenShell Gateway
+## 5. Scoped Subagent Orchestration & Temporary Worktree Policies (`--read-paths`, `--write-paths`, `--policy-file`)
+
+An orchestrator agent running inside a sandbox can delegate work to subagents (`orca orchestration worker-start --worktree current|new-child`) whose sandboxes can only see and modify an explicit subset of repository paths and use LLM-authored temporary OpenShell L7 network policies:
+
+```sh
+# Subagent can only read docs/ and read+write src/feature/ (excluded files like .env or secret/ never enter the container)
+orca orchestration worker-start \
+  --spec "Implement feature" \
+  --agent claude \
+  --worktree new-child \
+  --read-paths '["docs"]' \
+  --write-paths '["src/feature"]' \
+  --json
+
+# Or load JSON/YAML combining readPaths/writePaths + temporary OpenShell network_policies / endpoints
+orca orchestration worker-start \
+  --spec "Review docs and check GitHub API" \
+  --agent claude \
+  --worktree new-child \
+  --policy-file ./worker-policy.yaml \
+  --json
+```
+
+- **Worktree-Tied Temporary OpenShell Policies**: With `--worktree new-child`, the host creates the child worktree first, validates and installs the temporary OpenShell policy into `<child-worktree>/.agents/policies/.orca-openshell-temp-*.json` (git-excluded via `info/exclude`) before launching the sandbox, surfaces those rules with a `Temporary` badge in the **OpenShell Policies** panel, and removes them automatically on teardown or launch failure.
+- **Physical Read Isolation & Host-Side Write Enforcement**: Only `readPaths ∪ writePaths` are staged and uploaded to the subagent's OpenShell sandbox (`secret/`, `.env*`, `.git`, and unrelated folders do not exist inside `/sandbox`), and `mergeWorkspace` discards any edits outside `writePaths`.
+- **Strict Security Bounds & Attenuation**: `--read-paths` alone defaults to `writePaths: []` (read-only); `--write-paths` alone confines both reads and writes to `writePaths`; `..` traversal, `.git`, symlink escapes, Landlock downgrades, `outbound_token_redaction` tampering, private/metadata IPs, reserved provider endpoints, and nested policy escalation are rejected (`exit 77`).
+
+See [`../docs/ORCA_INTEGRATION.md`](../docs/ORCA_INTEGRATION.md#scoped-subagent-file-policies---read-paths---write-paths---policy-file) for the full schema and delegation broker details.
+
+---
+
+## 6. Using a Remote K3s OpenShell Gateway
 
 Because `local.openshell-bridge` and `agent-box` interact with sandboxes exclusively through the `openshell` CLI (`sandbox create --upload`, `sandbox download`, `sandbox ssh-config`, `policy set`, `provider create/update`) rather than local Docker bind-mounts, **you can run your sandboxes on a remote K3s cluster**:
 
@@ -169,7 +200,7 @@ Because `local.openshell-bridge` and `agent-box` interact with sandboxes exclusi
 
 ---
 
-## 6. Building & Extending Local Sandbox Dockerfiles
+## 7. Building & Extending Local Sandbox Dockerfiles
 
 The four sandbox container images checked by **Sandbox Container Images** and **OpenShell Doctor** are built locally from [`../docker/`](../docker/):
 
@@ -207,7 +238,7 @@ docker build -t openshell-antigravity:latest -f docker/Dockerfile.antigravity do
 
 ---
 
-## 7. Build, Test & Install Commands
+## 8. Build, Test & Install Commands
 
 ```sh
 # Rebuild the bundled panel HTML (orca-plugin/panel/index.html)

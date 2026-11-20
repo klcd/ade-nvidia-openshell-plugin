@@ -19,7 +19,15 @@ import {
   OpenShellSandbox,
   spawnSandboxLifecycleWatchdog,
 } from '../sandbox.js';
-import { getExtraProviderNames } from '../sandbox-scope.js';
+import { cleanupWorkerScope, readWorkerScope } from '../delegation.js';
+import { mergeTwoPolicies } from '../policy.js';
+import {
+  getExtraProviderNames,
+  getStagedUploadPaths,
+  getWorkspaceWritePaths,
+  intersectWorkspacePaths,
+  stageScopedWorkspace,
+} from '../sandbox-scope.js';
 import { drainL7RequestQueue } from './egress.js';
 import {
   getAgySessionDir,
@@ -78,7 +86,21 @@ export async function runAgyChatDaemon(
   const sandboxName = generateSandboxName('ag', projectName, harnessPid || process.pid);
   const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), `agy-chat-stage-${process.pid}-`));
 
+  const terminalId =
+    process.env.OPENSHELL_BRIDGE_TERMINAL_ID ||
+    process.env.ORCA_TERMINAL_HANDLE ||
+    (resolvedAgentSessionId ? `structured-agent-session-${resolvedAgentSessionId}` : '');
+  const workerScope = terminalId ? readWorkerScope(terminalId) : null;
+  const envWritePaths = getWorkspaceWritePaths(resolvedRoot);
+  const workspaceWritePaths = workerScope?.fileScope
+    ? (envWritePaths !== null
+        ? intersectWorkspacePaths(workerScope.fileScope.writePaths, envWritePaths, 'ORCA_SANDBOX_WRITE_PATHS')
+        : workerScope.fileScope.writePaths)
+    : envWritePaths;
+  const stagedUploadPaths = workerScope?.fileScope ? getStagedUploadPaths(workerScope.fileScope) : null;
+
   let sandbox: OpenShellSandbox | null = null;
+  let scopedStageRoot: string | null = null;
   const sshConfigPath = path.join(sessionDir, 'ssh_config');
   const sshControlPath = path.join(sessionDir, 'ctl.sock');
   let sshHost = `openshell-${sandboxName}`;
@@ -87,9 +109,19 @@ export async function runAgyChatDaemon(
     fs.writeFileSync(path.join(stageDir, '.gitconfig'), buildStagedGitConfig(resolvedRoot));
     const uploads = [
       { source: path.join(stageDir, '.gitconfig'), destination: '/sandbox/.gitconfig' },
-      { source: resolvedRoot, destination: '/sandbox' },
     ];
-    const policy = loadMergedAgyPolicy(resolvedRoot, projectName);
+    if (stagedUploadPaths) {
+      scopedStageRoot = fs.mkdtempSync(path.join(os.tmpdir(), `agy-ws-scope-${process.pid}-`));
+      const scopedDir = stageScopedWorkspace(resolvedRoot, projectName, scopedStageRoot, stagedUploadPaths);
+      uploads.push({ source: scopedDir, destination: '/sandbox' });
+    } else {
+      uploads.push({ source: resolvedRoot, destination: '/sandbox' });
+    }
+    let policy = loadMergedAgyPolicy(resolvedRoot, projectName, Boolean(workerScope?.fileScope));
+    if (workerScope?.openshellPolicy) {
+      policy = mergeTwoPolicies(policy, workerScope.openshellPolicy);
+      policy.landlock = { compatibility: 'hard_requirement' };
+    }
     const providers = [...new Set(['antigravity', ...getExtraProviderNames()])];
 
     const dockerBin = findHostBinary('docker') || 'docker';
@@ -195,6 +227,8 @@ export async function runAgyChatDaemon(
       createdAt: new Date().toISOString(),
       ready: true,
       hibernated: false,
+      ...(stagedUploadPaths !== null ? { stagedUploadPaths } : {}),
+      ...(workspaceWritePaths !== null ? { writePaths: workspaceWritePaths } : {}),
     };
 
     writeAtomicState(statePath, state);
@@ -215,6 +249,11 @@ export async function runAgyChatDaemon(
     try {
       fs.rmSync(stageDir, { recursive: true, force: true });
     } catch {}
+    if (scopedStageRoot) {
+      try {
+        fs.rmSync(scopedStageRoot, { recursive: true, force: true });
+      } catch {}
+    }
     return 1;
   } finally {
     try {
@@ -223,9 +262,20 @@ export async function runAgyChatDaemon(
     try {
       fs.rmSync(stageDir, { recursive: true, force: true });
     } catch {}
+    if (scopedStageRoot) {
+      try {
+        fs.rmSync(scopedStageRoot, { recursive: true, force: true });
+      } catch {}
+    }
   }
 
-  const watchdogPid = spawnSandboxLifecycleWatchdog(process.pid, sandboxName);
+  const watchdogPid = spawnSandboxLifecycleWatchdog(
+    process.pid,
+    sandboxName,
+    workerScope?.tempPolicyFilePath
+      ? { filePath: workerScope.tempPolicyFilePath, createdDirs: workerScope.tempPolicyCreatedDirs }
+      : null
+  );
 
   let shuttingDown = false;
   const cleanup = (alreadyDeleted = false) => {
@@ -250,6 +300,7 @@ export async function runAgyChatDaemon(
         );
       } catch {}
     }
+    cleanupWorkerScope(terminalId);
     if (!alreadyDeleted) {
       sandbox?.delete();
     }

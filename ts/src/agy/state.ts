@@ -21,6 +21,8 @@ export interface AgyChatSandboxState {
   createdAt: string;
   ready: boolean;
   hibernated?: boolean;
+  stagedUploadPaths?: string[] | null;
+  writePaths?: string[] | null;
 }
 
 export function shellQuote(value: string): string {
@@ -185,7 +187,7 @@ export function translateAgyCommandAndCwd(
   return { translatedCommand, containerCwd };
 }
 
-export function loadMergedAgyPolicy(projectRoot: string, projectName: string): OpenShellPolicy {
+export function loadMergedAgyPolicy(projectRoot: string, projectName: string, skipWriteScope = false): OpenShellPolicy {
   const defaultOrcaPolicy = path.join(
     USER_HOME,
     '.orca',
@@ -247,9 +249,11 @@ export function loadMergedAgyPolicy(projectRoot: string, projectName: string): O
     endpoints: { include: ['**'] },
   };
 
-  const workspaceWritePaths = getWorkspaceWritePaths(projectRoot);
-  if (workspaceWritePaths !== null) {
-    applyWorkspaceWriteScope(policy, projectName, '.gemini', workspaceWritePaths);
+  if (!skipWriteScope) {
+    const workspaceWritePaths = getWorkspaceWritePaths(projectRoot);
+    if (workspaceWritePaths !== null) {
+      applyWorkspaceWriteScope(policy, projectName, '.gemini', workspaceWritePaths);
+    }
   }
   return policy;
 }

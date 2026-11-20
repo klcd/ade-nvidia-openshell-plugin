@@ -23,6 +23,45 @@ try {
       const spec = fs.readFileSync(source === '-' ? 0 : source, 'utf8');
       argv.splice(i, 2, '--spec', spec);
     }
+    const pIdx = argv.indexOf('--policy-file');
+    if (pIdx >= 0) {
+      const pSource = argv[pIdx + 1];
+      if (!pSource) throw new Error('--policy-file requires a path or -');
+      const rawPolicy = fs.readFileSync(pSource === '-' ? 0 : pSource, 'utf8');
+      const extra = [];
+      let parsedJson = null;
+      if (rawPolicy.trim().startsWith('{')) {
+        parsedJson = JSON.parse(rawPolicy);
+      }
+      if (parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)) {
+        const rp = parsedJson.readPaths ?? parsedJson.read_paths;
+        const wp = parsedJson.writePaths ?? parsedJson.write_paths;
+        if (rp !== undefined && !argv.includes('--read-paths')) {
+          extra.push('--read-paths', JSON.stringify(rp));
+        }
+        if (wp !== undefined && !argv.includes('--write-paths')) {
+          extra.push('--write-paths', JSON.stringify(wp));
+        }
+        if (
+          parsedJson.network_policies !== undefined ||
+          parsedJson.networkPolicies !== undefined ||
+          parsedJson.endpoints !== undefined ||
+          parsedJson.filesystem_policy !== undefined ||
+          parsedJson.filesystemPolicy !== undefined ||
+          parsedJson.landlock !== undefined ||
+          parsedJson.network_middlewares !== undefined ||
+          parsedJson.networkMiddlewares !== undefined ||
+          parsedJson.process !== undefined
+        ) {
+          if (!argv.includes('--openshell-policy')) {
+            extra.push('--openshell-policy', JSON.stringify(parsedJson));
+          }
+        }
+      } else if (!argv.includes('--openshell-policy')) {
+        extra.push('--openshell-policy', rawPolicy);
+      }
+      argv.splice(pIdx, 2, ...extra);
+    }
   }
   const request = JSON.stringify({ id, argv }) + '\n';
   if (request.length > 65536) throw new Error('Delegation request is too large');

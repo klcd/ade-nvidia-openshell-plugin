@@ -132,10 +132,11 @@ export function buildPolicyReport(options?: {
       for (const file of fs.readdirSync(projectPolicyDir).sort()) {
         if (file.endsWith('.yaml') || file.endsWith('.yml') || file.endsWith('.json')) {
           const parsed = parseOpenShellPolicyFile(path.join(projectPolicyDir, file))
+          const isTemp = file.startsWith('.orca-openshell-temp-')
           parsed.endpoints = parsed.endpoints.map(ep => ({
             ...ep,
-            ruleScope: 'project' as const,
-            temporary: false,
+            ruleScope: (isTemp ? 'temporary' : 'project') as 'temporary' | 'project',
+            temporary: isTemp,
             sourcePath: `.agents/policies/${file}`,
           }))
           projectPolicies.push(parsed)
@@ -442,16 +443,16 @@ export function buildPolicyReport(options?: {
       for (const file of fs.readdirSync(grantsDir)) {
         if (!file.endsWith('.json')) continue
         const data = JSON.parse(fs.readFileSync(path.join(grantsDir, file), 'utf8'))
-        const ws = String(data.workspaceId || '')
+        const ws = String(data.workspace || data.workspaceId || '')
         if (ws && !ws.includes(selectedWorkspace.path) && ws !== selectedWorkspace.id) continue
         activeGrants.push({
-          terminal: String(data.terminalId || file.replace(/\.json$/, '')),
+          terminal: String(data.terminal || data.terminalId || file.replace(/\.json$/, '')),
           workspace: ws,
-          agents: Array.isArray(data.allowedAgents) ? data.allowedAgents.map(String) : [],
+          agents: Array.isArray(data.agents || data.allowedAgents) ? (data.agents || data.allowedAgents).map(String) : [],
           depth: Number(data.depth ?? 0),
           maxDepth: Number(data.maxDepth ?? 1),
           maxWorkers: Number(data.maxWorkers ?? 0),
-          remainingWorkers: Number(data.remainingWorkers ?? 0),
+          remainingWorkers: Number(data.remainingWorkers ?? data.maxWorkers ?? 0),
         })
       }
     } catch {}
@@ -466,8 +467,8 @@ export function buildPolicyReport(options?: {
     activeGrants,
     allowedCliCommands: [
       {
-        command: `orca orchestration worker-start --agent ${currentAgent} --spec "<task>" --worktree current --json`,
-        description: 'Spawns a supervised worker in its own isolated OpenShell sandbox (depth + 1)',
+        command: `orca orchestration worker-start --agent ${currentAgent} --spec "<task>" --worktree current|new-child [--name <name>] [--read-paths '["..."]'] [--write-paths '["..."]'] [--policy-file <path>] --json`,
+        description: 'Spawns a supervised worker in its own isolated OpenShell sandbox (depth + 1) in current or new child worktree with optional file subset and temporary LLM-authored OpenShell network/L7 policies',
       },
       {
         command: 'orca orchestration worker-show --dispatch <dispatch-id> --json',

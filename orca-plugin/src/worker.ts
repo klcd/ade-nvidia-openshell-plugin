@@ -11,6 +11,7 @@
 // ============================================================================
 
 import type { OrcaWorkerApi } from 'orca/worker'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -108,6 +109,121 @@ export function formatCliPolicySummary(workspacePath?: string): string {
   }
 
   return lines.join('\n')
+}
+
+function peekPendingDelegationScope(
+  workspaceId?: string,
+  agent?: string
+): { parentProjectRoot?: string } | null {
+  if (!workspaceId || !agent) return null
+  const delegationHome =
+    process.env.OPENSHELL_BRIDGE_DELEGATION_HOME || path.join(os.homedir(), '.agents', 'orca-openshell-delegation')
+  const pendingDir = path.join(delegationHome, 'pending-scopes')
+  if (!fs.existsSync(pendingDir)) return null
+  const expectedWs = workspaceId.startsWith('id:') ? workspaceId : `id:${workspaceId}`
+  const now = Date.now()
+  let files: string[]
+  try {
+    files = fs.readdirSync(pendingDir).filter(f => f.endsWith('.json')).sort()
+  } catch {
+    return null
+  }
+  for (const file of files) {
+    const full = path.join(pendingDir, file)
+    try {
+      const data = JSON.parse(fs.readFileSync(full, 'utf8')) as {
+        workspace?: string
+        parentProjectRoot?: string
+        agent?: string
+        at?: number
+      }
+      if (typeof data.at !== 'number' || now - data.at > 60_000) continue
+      if (data.workspace === expectedWs && data.agent === agent) {
+        return { parentProjectRoot: data.parentProjectRoot }
+      }
+    } catch {}
+  }
+  return null
+}
+
+function claimPendingDelegationScope(terminalId: string, workspaceId: string, agent: string): void {
+  const delegationHome = process.env.OPENSHELL_BRIDGE_DELEGATION_HOME || path.join(os.homedir(), '.agents', 'orca-openshell-delegation')
+  const pendingDir = path.join(delegationHome, 'pending-scopes')
+  if (!fs.existsSync(pendingDir)) return
+  const expectedWs = workspaceId.startsWith('id:') ? workspaceId : `id:${workspaceId}`
+  const now = Date.now()
+  let files: string[]
+  try {
+    files = fs.readdirSync(pendingDir).filter(f => f.endsWith('.json')).sort()
+  } catch {
+    return
+  }
+  for (const file of files) {
+    const full = path.join(pendingDir, file)
+    const claiming = `${full}.${process.pid}.claiming`
+    try {
+      const data = JSON.parse(fs.readFileSync(full, 'utf8')) as {
+        id?: string
+        workspace?: string
+        projectRoot?: string
+        agent?: string
+        fileScope?: { readPaths: string[] | null; writePaths: string[] | null } | null
+        openshellPolicy?: Record<string, unknown> | null
+        tempPolicyFilePath?: string | null
+        tempPolicyCreatedDirs?: string[]
+        pendingGrant?: Record<string, unknown>
+        at?: number
+      }
+      if (typeof data.at !== 'number' || now - data.at > 60_000) {
+        try { fs.unlinkSync(full) } catch {}
+        continue
+      }
+      if (data.workspace === expectedWs && data.agent === agent) {
+        try {
+          fs.renameSync(full, claiming)
+        } catch {
+          continue
+        }
+        if (data.fileScope || data.openshellPolicy || data.tempPolicyFilePath) {
+          const scopesDir = path.join(delegationHome, 'scopes')
+          fs.mkdirSync(scopesDir, { recursive: true, mode: 0o700 })
+          const key = crypto.createHash('sha256').update(terminalId).digest('hex')
+          const dest = path.join(scopesDir, `${key}.json`)
+          const tmp = `${dest}.${process.pid}`
+          fs.writeFileSync(tmp, JSON.stringify({
+            terminal: terminalId,
+            workspace: data.workspace,
+            projectRoot: data.projectRoot,
+            fileScope: data.fileScope ?? null,
+            ...(data.openshellPolicy ? { openshellPolicy: data.openshellPolicy } : {}),
+            ...(data.tempPolicyFilePath ? { tempPolicyFilePath: data.tempPolicyFilePath } : {}),
+            ...(data.tempPolicyCreatedDirs ? { tempPolicyCreatedDirs: data.tempPolicyCreatedDirs } : {}),
+            at: now,
+          }), { mode: 0o600 })
+          fs.renameSync(tmp, dest)
+        }
+        if (data.pendingGrant) {
+          const grantsDir = path.join(delegationHome, 'grants')
+          fs.mkdirSync(grantsDir, { recursive: true, mode: 0o700 })
+          const key = crypto.createHash('sha256').update(terminalId).digest('hex')
+          const gDest = path.join(grantsDir, `${key}.json`)
+          const gTmp = `${gDest}.${process.pid}`
+          fs.writeFileSync(gTmp, JSON.stringify({ ...data.pendingGrant, terminal: terminalId }), { mode: 0o600 })
+          fs.renameSync(gTmp, gDest)
+        }
+        if (data.id) {
+          const claimedDir = path.join(delegationHome, 'claimed-scopes')
+          fs.mkdirSync(claimedDir, { recursive: true, mode: 0o700 })
+          const cDest = path.join(claimedDir, `${data.id}.json`)
+          const cTmp = `${cDest}.${process.pid}`
+          fs.writeFileSync(cTmp, JSON.stringify({ id: data.id, terminal: terminalId, workspace: expectedWs, at: now }), { mode: 0o600 })
+          fs.renameSync(cTmp, cDest)
+        }
+        try { fs.unlinkSync(claiming) } catch {}
+        return
+      }
+    } catch {}
+  }
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
@@ -211,7 +327,19 @@ export default function activate(orca: OrcaWorkerApi): void {
       )
     )
     const launchWorkspacePath = resolveWorkspacePathById(event.workspaceId)
-    if (!getSandboxMode({ workspacePath: launchWorkspacePath, workspaceId: event.workspaceId }).enabled) {
+    const pendingDelegation = peekPendingDelegationScope(event.workspaceId, event.agent)
+    const extraParentPaths =
+      launchWorkspacePath &&
+      pendingDelegation?.parentProjectRoot &&
+      launchWorkspacePath !== pendingDelegation.parentProjectRoot
+        ? { [launchWorkspacePath]: pendingDelegation.parentProjectRoot }
+        : undefined
+    const sandboxState = getSandboxMode({
+      workspacePath: launchWorkspacePath,
+      workspaceId: event.workspaceId,
+      parentPaths: extraParentPaths,
+    })
+    if (!sandboxState.enabled && !pendingDelegation) {
       orca.log(`OpenShell sandboxing deactivated for worktree; launching ${event.agent} on host in ${event.workspaceId ?? launchWorkspacePath ?? 'unknown workspace'}`)
       setTimeout(refreshStatusBar, 500)
       return next({
@@ -233,6 +361,9 @@ export default function activate(orca: OrcaWorkerApi): void {
         else if (event.agent === 'agy') policyFile = path.join(policyDir, 'antigravity.json')
       }
       if (!fs.existsSync(policyFile)) return { deny: `OpenShell policy is missing: ${policyFile}` }
+      if (event.terminalId && event.workspaceId) {
+        claimPendingDelegationScope(event.terminalId, event.workspaceId, event.agent)
+      }
       orca.log(`OpenShell bridge selected for ${event.agent} in ${event.workspaceId ?? 'unknown workspace'}`)
       setTimeout(refreshStatusBar, 1500)
       return next({ ...event, command, env: {

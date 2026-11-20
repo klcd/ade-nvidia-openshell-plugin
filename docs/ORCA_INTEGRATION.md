@@ -115,6 +115,62 @@ orca orchestration check --peek --json
 The shim also translates `--spec-file <path|->` by reading the file or stdin
 inside the sandbox. It never asks the host to read a sandbox-supplied path.
 
+### Scoped subagent file policies (`--read-paths`, `--write-paths`, `--policy-file`)
+
+An orchestrator can restrict a subagent to a subset of workspace files AND/OR attach LLM-authored temporary OpenShell network/L7/filesystem policies tied to a dedicated child worktree:
+
+```sh
+# Subagent runs in a new child worktree, confined to docs/ (ro) + src/feature/ (rw)
+orca orchestration worker-start \
+  --spec 'Implement feature' \
+  --agent claude \
+  --worktree new-child \
+  --name feat-subagent \
+  --read-paths '["docs"]' \
+  --write-paths '["src/feature"]' \
+  --json
+
+# Or pass a JSON/YAML policy file (combining file subsets + temporary OpenShell L7 rules)
+orca orchestration worker-start \
+  --spec 'Query GitHub API and update docs' \
+  --agent codex \
+  --worktree new-child \
+  --policy-file ./worker-policy.json \
+  --json
+```
+
+JSON / YAML schema for `--policy-file <path|->`:
+
+```json
+{
+  "readPaths": ["docs", "src/shared"],
+  "writePaths": ["src/feature"],
+  "network_policies": {
+    "github_readonly": {
+      "name": "github_readonly",
+      "binaries": [{ "path": "/usr/bin/curl" }],
+      "endpoints": [
+        {
+          "host": "api.github.com",
+          "port": 443,
+          "protocol": "rest",
+          "enforcement": "enforce",
+          "rules": [{ "allow": { "method": "GET", "path": "/repos/**" } }]
+        }
+      ]
+    }
+  }
+}
+```
+*(Shorthand `"endpoints": [{ "host": "httpbin.org", "port": 443, "method": "GET", "path": "/get" }]` is also accepted and normalized into canonical `network_policies`.)*
+
+How enforcement and worktree lifecycle work:
+- **Worktree-tied policy install & teardown**: With `--worktree new-child`, the host creates the child worktree via `orca worktree create`, installs the validated temporary OpenShell policy into `<child-worktree>/.agents/policies/.orca-openshell-temp-<id>.json` (excluded from `git status` via `info/exclude`) **before** launching the sandbox, exposes those rules live in the **OpenShell Policies** panel, and automatically deletes the temporary policy file on teardown or launch rollback (including in the watchdog).
+- **Strict host security bounds**: LLM-authored policies are rejected (`exit 77`) if they attempt to weaken `landlock.compatibility` from `hard_requirement`, alter `network_middlewares` (`outbound_token_redaction`), set `process`, disable `enforcement: enforce`, set `request_body_credential_rewrite`, redefine provider hosts (`api.anthropic.com`, `api.openai.com`, etc.), reach loopback/metadata/RFC1918 IPs, or touch host paths outside safe container prefixes.
+- **File subset defaults**: `--read-paths` alone creates a read-only worker (`writePaths: []`); `--write-paths` alone restricts both reads and writes to `writePaths`; `readPaths: ["*"]` allows reading the whole workspace while limiting writes. `writePaths` are always readable.
+- **Physical read isolation & host write filtering**: Only allowed `readPaths ∪ writePaths` are uploaded into the container (`.env*`, secrets, `.git`, and excluded dirs stay outside), and `mergeWorkspace` discards any sandbox edits outside `writePaths`.
+- **Nested monotonic attenuation**: Subagents cannot widen parent `readPaths`/`writePaths` or add network endpoints outside their parent worker's OpenShell policy or optional `allowedEgressHosts` grant.
+
 ## Structured Chat Mode (`surface: "chat"`) vs Terminal Mode (`surface: "terminal"`)
 
 Orca supports two launch surfaces:

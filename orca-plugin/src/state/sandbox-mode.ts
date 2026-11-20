@@ -99,6 +99,44 @@ export function syncOrcaWorktreeLineage(
   } catch {}
 }
 
+export function recordWorktreeParentPath(
+  childPath: string,
+  parentPath: string,
+  homeDir = os.homedir()
+): void {
+  const normChild = normalizeWorktreePath(childPath)
+  const normParent = normalizeWorktreePath(parentPath)
+  if (!normChild || !normParent || normChild === normParent) return
+  const filePath = getSandboxModeFilePath(homeDir)
+  try {
+    withStateLock(filePath, () => {
+      const existing = readJsonSafe<SandboxModeFileData>(filePath, {})
+      const prevParents = existing.parentPaths || {}
+      if (prevParents[normChild] === normParent) return
+      writeJsonAtomic(filePath, {
+        ...existing,
+        parentPaths: { ...prevParents, [normChild]: normParent },
+      })
+    })
+  } catch {}
+}
+
+export function removeWorktreeParentPath(childPath: string, homeDir = os.homedir()): void {
+  const normChild = normalizeWorktreePath(childPath)
+  if (!normChild) return
+  const filePath = getSandboxModeFilePath(homeDir)
+  try {
+    if (!fs.existsSync(filePath)) return
+    withStateLock(filePath, () => {
+      const existing = readJsonSafe<SandboxModeFileData>(filePath, {})
+      if (!existing.parentPaths || !(normChild in existing.parentPaths)) return
+      const nextParents = { ...existing.parentPaths }
+      delete nextParents[normChild]
+      writeJsonAtomic(filePath, { ...existing, parentPaths: nextParents })
+    })
+  } catch {}
+}
+
 export function getSandboxMode(
   optionsOrHomeDir?: SandboxModeQueryOptions | string,
   homeDirArg = os.homedir()

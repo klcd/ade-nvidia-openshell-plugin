@@ -14,22 +14,35 @@ export function ensureValidHostTmpDir(): void {
 
 export function spawnSandboxLifecycleWatchdog(
   watchedPid: number,
-  sandboxName: string
+  sandboxName: string,
+  tempPolicy?: { filePath?: string | null; createdDirs?: string[] } | null
 ): number | undefined {
   try {
+    const filePathArg = tempPolicy?.filePath || '';
+    const dirsArg = JSON.stringify(tempPolicy?.createdDirs || []);
     const watchdog = spawn(
       process.execPath,
       [
         '-e',
-        `const { execFileSync } = require('node:child_process');
+        `const fs = require('node:fs');
+         const { execFileSync } = require('node:child_process');
          const ppid = Number(process.argv[1]);
          const name = process.argv[2];
+         const tmpPolicy = process.argv[3];
+         const tmpDirs = JSON.parse(process.argv[4] || '[]');
          let deleting = false;
+         const cleanupTmp = () => {
+           if (tmpPolicy) { try { if (fs.existsSync(tmpPolicy)) fs.unlinkSync(tmpPolicy); } catch {} }
+           for (const d of [...tmpDirs].reverse()) {
+             try { if (fs.existsSync(d) && fs.readdirSync(d).length === 0) fs.rmdirSync(d); } catch {}
+           }
+         };
          const timer = setInterval(() => {
            if (deleting) return;
            try { process.kill(ppid, 0); } catch {
              deleting = true;
              clearInterval(timer);
+             cleanupTmp();
              let attempts = 0;
              const tryDelete = () => {
                attempts++;
@@ -46,6 +59,8 @@ export function spawnSandboxLifecycleWatchdog(
          }, 1000);`,
         String(watchedPid),
         sandboxName,
+        filePathArg,
+        dirsArg,
       ],
       { detached: true, stdio: 'ignore', env: { ...process.env, TMPDIR: '/tmp' } }
     );
