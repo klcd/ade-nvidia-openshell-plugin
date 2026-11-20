@@ -4,7 +4,7 @@ import type {
   SandboxDoctorReport,
 } from '../types.ts'
 
-export type PanelTab = 'egress' | 'system'
+export type PanelTab = 'egress' | 'filesystem' | 'setup' | 'settings'
 
 export const panelState = {
   currentReport: null as PolicyInspectionReport | null,
@@ -20,5 +20,6 @@ export const panelState = {
   openCliRules: new Set<string>(),
   openEgress: new Set<string>(),
   openSections: new Set<string>(),
+  closedSections: new Set<string>(),
   openSystemItems: new Set<string>(),
 }

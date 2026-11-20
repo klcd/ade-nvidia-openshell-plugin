@@ -587,6 +587,7 @@ button.small {
       </div>
       <div class="image-alarm-actions">
         <button id="copyInstallBtn" class="small primary" title="Copy repository build command to clipboard" data-copy="./install.sh">Copy ./install.sh</button>
+        <button id="openSetupTabBtn" class="small" title="Open the Setup tab to inspect missing images and prerequisites">Open Setup</button>
       </div>
     </div>
     <div id="contextBanner" class="grid-2" style="margin-top:2px;">
@@ -621,8 +622,10 @@ button.small {
   </div>
 
   <div class="tabs">
-    <button class="tab active" data-tab="egress">Sandbox Egress (<span id="egressCount">0</span>)</button>
-    <button class="tab" data-tab="system">Sandbox System <span id="systemAlarmBadge" class="badge deny" style="display:none;margin-left:4px;padding:1px 5px;font-size:10px;">!</span></button>
+    <button class="tab active" data-tab="egress">Egress</button>
+    <button class="tab" data-tab="filesystem">Filesystem</button>
+    <button class="tab" data-tab="setup" title="Prerequisites and container image availability">Setup <span id="setupAlarmBadge" class="badge deny" style="display:none;margin-left:4px;padding:1px 5px;font-size:10px;">!</span></button>
+    <button class="tab" data-tab="settings" title="Sandbox defaults, auto-pause timeout, and configuration paths">Settings</button>
   </div>
 
   <div id="tabContent"></div>
@@ -645,6 +648,7 @@ button.small {
     openCliRules: new Set,
     openEgress: new Set,
     openSections: new Set,
+    closedSections: new Set,
     openSystemItems: new Set
   };
 
@@ -672,6 +676,14 @@ button.small {
   function sandboxesSignature(rep) {
     const sbs = rep?.activeSandboxes || [];
     return sbs.map((s) => `${s.name}:${s.phase || ""}`).join("|");
+  }
+  function setupSignature(rep) {
+    if (!rep)
+      return "";
+    const imgs = (rep.sandboxImages?.images || []).map((i) => `${i.name}:${i.present ? "1" : "0"}:${i.size || ""}`).join("|");
+    const wraps = (rep.setup?.wrappers || []).map((w) => w.present ? "1" : "0").join("");
+    const pols = (rep.setup?.policies || []).map((p) => p.present ? "1" : "0").join("");
+    return `${rep.sandboxImages?.dockerAvailable ? "1" : "0"}:${imgs}:${wraps}:${pols}`;
   }
 
   // orca-plugin/src/panel/views/egress-tab.ts
@@ -807,6 +819,334 @@ button.small {
   `;
   }
 
+  // orca-plugin/src/panel/views/settings-tab.ts
+  function isSectionOpen(sectionId, defaultOpen = true) {
+    if (defaultOpen) {
+      return !panelState.closedSections.has(sectionId);
+    }
+    return panelState.openSections.has(sectionId);
+  }
+  function renderSettingsTab() {
+    const report = panelState.currentReport;
+    if (!report)
+      return "";
+    const defaultEnabled = report.defaultSandboxEnabled === true;
+    const ws = report.selectedWorkspace;
+    const inheritedFrom = report.sandboxInheritedFrom || null;
+    const worktreeStateLabel = report.sandboxEnabled ? "Sandbox (Enforced)" : inheritedFrom ? `Host Mode (Inherited from ${inheritedFrom.split("/").filter(Boolean).pop() || inheritedFrom})` : "Host Mode (Off)";
+    const defaultModeControlHtml = `
+    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Default Sandbox State</span>
+        <span class="sub">Global default for new or unconfigured worktrees (override per worktree using the top <code class="mono">Sandbox</code> toggle).</span>
+      </div>
+      <select id="defaultSandboxModeSelect" style="max-width:150px;flex-shrink:0;" title="Default OpenShell sandbox state for unconfigured worktrees">
+        <option value="off" ${!defaultEnabled ? "selected" : ""}>Off (Host Mode)</option>
+        <option value="on" ${defaultEnabled ? "selected" : ""}>On (Enforced)</option>
+      </select>
+    </div>
+  `;
+    const idleSec = typeof report.sandboxIdleTimeoutSeconds === "number" ? report.sandboxIdleTimeoutSeconds : 300;
+    const presetIdleValues = [0, 60, 180, 300, 600, 900];
+    const customIdleOption = !presetIdleValues.includes(idleSec) ? `<option value="${idleSec}" selected>${idleSec}s (Custom)</option>` : "";
+    const idleControlHtml = `
+    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Auto-Pause When Idle</span>
+        <span class="sub">Per-tab setting: stops this tab's idle container while preserving <code class="mono">/sandbox</code> &amp; L7 policies; restarts automatically on next turn or command.</span>
+      </div>
+      <select id="idleTimeoutSelect" style="max-width:150px;flex-shrink:0;" title="Idle duration before this tab's sandbox container automatically pauses">
+        <option value="0" ${idleSec === 0 ? "selected" : ""}>Off (Always On)</option>
+        <option value="60" ${idleSec === 60 ? "selected" : ""}>1 minute</option>
+        <option value="180" ${idleSec === 180 ? "selected" : ""}>3 minutes</option>
+        <option value="300" ${idleSec === 300 ? "selected" : ""}>5 minutes</option>
+        <option value="600" ${idleSec === 600 ? "selected" : ""}>10 minutes</option>
+        <option value="900" ${idleSec === 900 ? "selected" : ""}>15 minutes</option>
+        ${customIdleOption}
+      </select>
+    </div>
+  `;
+    const worktreeModeRowHtml = `
+    <div class="cmd-row" data-tooltip="Worktree: ${escapeHtml(ws.path)}">
+      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Current Worktree Mode</span>
+        <span class="sub" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ws.name)} &mdash; ${escapeHtml(worktreeStateLabel)}</span>
+      </div>
+      <span class="badge ${report.sandboxEnabled ? "allow" : "warn"}">${report.sandboxEnabled ? "SANDBOX" : "HOST"}</span>
+    </div>
+  `;
+    const del = report.delegation;
+    const delegationRowsHtml = `
+    <div class="cmd-row">
+      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Auto-Grant Coordinator Delegation</span>
+        <span class="sub">${del?.configPath ? `Configured via <code class="mono">${escapeHtml(del.configPath)}</code>` : 'Set <code class="mono">ORCA_AUTO_GRANT_DELEGATION=1</code> or create <code class="mono">.agents/delegation.json</code>.'}</span>
+      </div>
+      <span class="badge ${del?.autoGrantEnabled ? "allow" : "neutral"}">${del?.autoGrantEnabled ? "ON" : "MANUAL"}</span>
+    </div>
+    <div class="cmd-row">
+      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Worker Limits &amp; Active Grants</span>
+        <span class="sub">Agents: ${escapeHtml((del?.allowedAgents || []).join(", "))} &bull; Max workers: ${escapeHtml(String(del?.maxWorkers ?? 2))} &bull; Max depth: ${escapeHtml(String(del?.maxDepth ?? 1))}</span>
+      </div>
+      <span class="source-pill">${escapeHtml(String(del?.activeGrants?.length || 0))} active</span>
+    </div>
+  `;
+    const setup = report.setup;
+    const pathsHtml = `
+    <div class="cmd-row" data-tooltip="Per-worktree Sandbox/Host state and Auto-Pause idle timers">
+      <div style="display:flex;flex-direction:column;gap:1px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Sandbox Mode State File</span>
+        <span class="cmd-code sub">~/.config/orca-openshell/sandbox-mode.json</span>
+      </div>
+      <span class="source-pill">&#8984; state</span>
+    </div>
+    <div class="cmd-row" data-tooltip="Project-level and temporary subagent OpenShell L7 policies">
+      <div style="display:flex;flex-direction:column;gap:1px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Project Policy Directory</span>
+        <span class="cmd-code sub" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ws.path)}/.agents/policies</span>
+      </div>
+      <span class="source-pill">&#8984; project</span>
+    </div>
+    <div class="cmd-row" data-tooltip="Global Orca OpenShell agent L7 policies">
+      <div style="display:flex;flex-direction:column;gap:1px;min-width:0;flex:1;">
+        <span style="font-size:11px;font-weight:600;color:var(--fg);">Global L7 Policy Directory</span>
+        <span class="cmd-code sub" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(setup?.policyDir || "~/.agents/orca-openshell-policies")}</span>
+      </div>
+      <span class="source-pill">&#8984; global</span>
+    </div>
+  `;
+    return `
+    <details class="app-fold" data-section="settings-sandbox" ${isSectionOpen("settings-sandbox", true) ? "open" : ""}>
+      <summary>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="fold-chevron">&#9654;</span>
+          <span class="access-dot ro"></span>
+          <span>Sandbox Preferences</span>
+        </div>
+        <span class="source-pill">&#8984; preferences</span>
+      </summary>
+      <div class="app-fold-body">
+        ${defaultModeControlHtml}
+        ${idleControlHtml}
+        ${worktreeModeRowHtml}
+      </div>
+    </details>
+
+    <details class="app-fold" data-section="settings-delegation" ${isSectionOpen("settings-delegation", true) ? "open" : ""}>
+      <summary>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="fold-chevron">&#9654;</span>
+          <span class="access-dot l7"></span>
+          <span>Delegation &amp; Orchestration</span>
+        </div>
+        <span class="source-pill">&#8984; broker</span>
+      </summary>
+      <div class="app-fold-body">
+        ${delegationRowsHtml}
+      </div>
+    </details>
+
+    <details class="app-fold" data-section="settings-paths" ${isSectionOpen("settings-paths", true) ? "open" : ""}>
+      <summary>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="fold-chevron">&#9654;</span>
+          <span class="access-dot rw"></span>
+          <span>Configuration Paths</span>
+        </div>
+        <span class="source-pill">&#8984; files</span>
+      </summary>
+      <div class="app-fold-body">
+        ${pathsHtml}
+      </div>
+    </details>
+  `;
+  }
+
+  // orca-plugin/src/panel/views/setup-tab.ts
+  function isSectionOpen2(sectionId, defaultOpen = true) {
+    if (defaultOpen) {
+      return !panelState.closedSections.has(sectionId);
+    }
+    return panelState.openSections.has(sectionId);
+  }
+  function renderSetupTab() {
+    const report = panelState.currentReport;
+    if (!report)
+      return "";
+    const docReport = panelState.doctorReport;
+    const imgReport = report.sandboxImages;
+    const setup = report.setup;
+    const imagesPresentCount = imgReport ? imgReport.images.filter((i) => i.present).length : 0;
+    const imagesTotalCount = imgReport?.images?.length || 4;
+    const dockerOk = Boolean(imgReport?.dockerAvailable);
+    const imagesAllPresent = Boolean(dockerOk && imgReport?.allPresent);
+    const wrappers = setup?.wrappers || [];
+    const wrappersPresentCount = wrappers.filter((w) => w.present).length;
+    const wrappersAllPresent = wrappers.length > 0 && wrappersPresentCount === wrappers.length;
+    const policies = setup?.policies || [];
+    const policiesPresentCount = policies.filter((p) => p.present).length;
+    const policiesAllPresent = policies.length > 0 && policiesPresentCount === policies.length;
+    const cliCheck = docReport?.checks?.find((c) => c.id === "openshell-cli");
+    const gatewayCheck = docReport?.checks?.find((c) => c.id === "openshell-cluster");
+    const registryCheck = docReport?.checks?.find((c) => c.id === "registry-health");
+    const cliOk = cliCheck ? cliCheck.status === "pass" : Boolean(setup?.openshellInstalled);
+    const gatewayOk = gatewayCheck ? gatewayCheck.status === "pass" : null;
+    const coreReadyCount = [
+      cliOk,
+      gatewayOk === true,
+      imagesAllPresent,
+      wrappersAllPresent,
+      policiesAllPresent
+    ].filter(Boolean).length;
+    const totalCoreChecks = 5;
+    const hasFailures = !cliOk || gatewayOk === false || !imagesAllPresent || !wrappersAllPresent || !policiesAllPresent || Boolean(docReport && !docReport.ok);
+    const summaryDot = !hasFailures && gatewayOk === true ? "rw" : hasFailures ? "deny" : "l7";
+    const summaryBadgeClass = !hasFailures && gatewayOk === true ? "allow" : hasFailures ? "deny" : "warn";
+    const summaryBadgeText = !hasFailures && gatewayOk === true ? "ALL READY" : panelState.runningDoctor && gatewayOk === null ? "CHECKING..." : hasFailures ? "ACTION NEEDED" : `${coreReadyCount}/${totalCoreChecks} READY`;
+    const summarySubtitle = !hasFailures && gatewayOk === true ? "OpenShell CLI, Gateway, Docker images, wrappers, and L7 policies are installed and ready." : hasFailures ? "One or more required OpenShell components or container images are missing or unreachable." : "Checking OpenShell Gateway connectivity and local runtime prerequisites...";
+    const summaryBannerHtml = `
+    <div class="card" style="padding:9px 10px;gap:7px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+          <span class="access-dot ${summaryDot}"></span>
+          <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <strong style="font-size:12px;color:var(--fg);">Environment Readiness</strong>
+              <span class="badge ${summaryBadgeClass}">${summaryBadgeText}</span>
+            </div>
+            <span class="sub">${escapeHtml(summarySubtitle)}</span>
+          </div>
+        </div>
+        <button id="runDoctorBtn" class="copy-btn primary" ${panelState.runningDoctor ? "disabled" : ""} title="Verify OpenShell CLI, Gateway, Docker images, wrappers, policies, and session registry">
+          ${panelState.runningDoctor ? "Checking..." : "Re-check All"}
+        </button>
+      </div>
+    </div>
+  `;
+    const imagesHtml = imgReport ? (() => {
+      const rows = (imgReport.images || []).map((img) => {
+        const dot = img.present ? "rw" : "deny";
+        const badgeClass = img.present ? "allow" : "deny";
+        const statusText = img.present ? "READY" : "MISSING";
+        const sizeHtml = img.size ? `<span class="source-pill" style="font-size:10px;">${escapeHtml(img.size)}</span>` : "";
+        const tooltip = `${img.name}\n${img.role}\nStatus: ${statusText}${img.size ? ` (${img.size})` : ""}${img.createdAt ? `\nCreated: ${img.createdAt}` : ""}`;
+        return `
+            <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span class="access-dot ${dot}" title="${img.present ? "Installed" : "Missing"}"></span>
+                <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(img.name)}</span>
+                  <span class="sub" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(img.role)}</span>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                ${sizeHtml}
+                <span class="badge ${badgeClass}">${statusText}</span>
+              </div>
+            </div>
+          `;
+      }).join("");
+      const missingAlert = !imgReport.dockerAvailable ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);flex-direction:column;align-items:flex-start;gap:4px;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span class="access-dot deny"></span>
+                <strong style="color:var(--danger);font-size:11.5px;">Docker Daemon Not Reachable</strong>
+              </div>
+              <span class="sub" style="color:var(--fg);">${escapeHtml(imgReport.error || "Cannot communicate with Docker. Ensure Docker is running.")}</span>
+            </div>` : !imgReport.allPresent ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+                  <strong style="color:var(--danger);font-size:11.5px;">Missing Required Sandbox Image(s)</strong>
+                  <span class="sub">Run <code class="mono">./install.sh</code> in the repository root to build required base and agent images.</span>
+                </div>
+                <button class="copy-btn primary" data-copy="./install.sh" title="Copy install command to clipboard">Copy ./install.sh</button>
+              </div>` : "";
+      return `${missingAlert}${rows}`;
+    })() : `<div class="sub">No sandbox container image status available.</div>`;
+    const imagesFoldDot = imagesAllPresent ? "rw" : "deny";
+    const makeStatusRow = (label, detail, status, tooltip, actionHtml = "") => {
+      const dot = status === "pass" ? "rw" : status === "warn" || status === "checking" ? "l7" : "deny";
+      const badgeClass = status === "pass" ? "allow" : status === "warn" || status === "checking" ? "warn" : "deny";
+      const badgeLabel = status === "pass" ? "READY" : status === "warn" ? "WARN" : status === "checking" ? "CHECK" : "MISSING";
+      return `
+      <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
+        <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+          <span class="access-dot ${dot}"></span>
+          <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
+            <span style="font-size:11.5px;font-weight:600;color:var(--fg);">${escapeHtml(label)}</span>
+            <span class="sub" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(detail)}</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+          ${actionHtml}
+          <span class="badge ${badgeClass}">${badgeLabel}</span>
+        </div>
+      </div>
+    `;
+    };
+    const cliRowHtml = makeStatusRow("OpenShell CLI", cliCheck ? cliCheck.detail : setup?.openshellInstalled ? `Installed at ${setup.openshellBinary}` : "openshell binary not found in PATH", cliCheck ? cliCheck.status : setup?.openshellInstalled ? "pass" : "fail", `OpenShell binary: ${setup?.openshellBinary || "openshell"}\nRequired for sandbox creation, SSH exec, and L7 policy updates.`);
+    const gatewayStatus = gatewayCheck ? gatewayCheck.status : panelState.runningDoctor ? "checking" : "warn";
+    const gatewayDetail = gatewayCheck ? gatewayCheck.detail : panelState.runningDoctor ? "Checking active OpenShell gateway..." : "Click Re-check All to test live gateway reachability.";
+    const gatewayRowHtml = makeStatusRow("OpenShell Gateway", gatewayDetail, gatewayStatus, "Verifies connectivity to your active local Docker or remote K3s OpenShell gateway (openshell sandbox list).");
+    const missingWrappers = wrappers.filter((w) => !w.present).map((w) => w.name);
+    const wrappersRowHtml = makeStatusRow(`Host Bridge Wrappers (${wrappersPresentCount}/${wrappers.length})`, wrappersAllPresent ? `Installed in ${setup.binDir}` : `Missing in ${setup.binDir}: ${missingWrappers.join(", ")}`, wrappersAllPresent ? "pass" : "fail", wrappers.map((w) => `${w.present ? "\u2713" : "\u2717"} ${w.path}`).join("\n"), wrappersAllPresent ? "" : `<button class="copy-btn" data-copy="./scripts/install-orca-host.sh" title="Copy host bridge installer command">Copy Install</button>`);
+    const missingPolicies = policies.filter((p) => !p.present).map((p) => p.name);
+    const policiesRowHtml = makeStatusRow(`Agent L7 Base Policies (${policiesPresentCount}/${policies.length})`, policiesAllPresent ? `Installed in ${setup.policyDir}` : `Missing in ${setup.policyDir}: ${missingPolicies.join(", ")}`, policiesAllPresent ? "pass" : "fail", policies.map((p) => `${p.present ? "\u2713" : "\u2717"} ${p.path}`).join("\n"), policiesAllPresent ? "" : `<button class="copy-btn" data-copy="./scripts/install-orca-host.sh" title="Copy host bridge installer command">Copy Install</button>`);
+    const sync = report.nativeSync;
+    const syncCount = [sync?.claudeSynced, sync?.codexSynced, sync?.geminiSynced].filter(Boolean).length;
+    const syncRowHtml = makeStatusRow(`Native CLI Permission Sync (${syncCount}/3)`, `Claude (${sync?.claudeAllowCount || 0}/${sync?.claudeDenyCount || 0}), Codex (${sync?.codexRuleCount || 0}), Gemini (${sync?.geminiAllowCount || 0}/${sync?.geminiDenyCount || 0})`, syncCount === 3 ? "pass" : syncCount > 0 ? "warn" : "warn", [
+      `Claude: ${sync?.claudeSettingsPath || "~/.claude/settings.json"} (${sync?.claudeSynced ? "synced" : "not found"})`,
+      `Codex: ${sync?.codexRulesPath || "~/.codex/rules/default.rules"} (${sync?.codexSynced ? "synced" : "not found"})`,
+      `Gemini: ${sync?.geminiSettingsPath || "~/.gemini/policies/managed-permissions.toml"} (${sync?.geminiSynced ? "synced" : "not found"})`
+    ].join("\n"));
+    const del = report.delegation;
+    const delegationRowHtml = makeStatusRow("Subagent Delegation Broker", del?.autoGrantEnabled ? `Auto-Grant ON (${del.allowedAgents.join(", ")} \u2022 max ${del.maxWorkers} workers, depth ${del.maxDepth})` : `Manual Grant (${del?.activeGrants?.length || 0} active grant${(del?.activeGrants?.length || 0) === 1 ? "" : "s"})`, "pass", [
+      `Auto-Grant: ${del?.autoGrantEnabled ? "Enabled" : "Disabled"}`,
+      `Config: ${del?.configPath || "ORCA_AUTO_GRANT_DELEGATION / default"}`,
+      `Allowed agents: ${(del?.allowedAgents || []).join(", ")}`,
+      `Limits: maxWorkers=${del?.maxWorkers ?? 2}, maxDepth=${del?.maxDepth ?? 1}`,
+      `Active grants: ${del?.activeGrants?.length || 0}`
+    ].join("\n"));
+    const registryRowHtml = registryCheck ? makeStatusRow("Session Registry", registryCheck.detail, registryCheck.status, "Tracks active sandbox sessions per tab and prunes stale entries.") : "";
+    const prereqAllOk = cliOk && gatewayOk !== false && wrappersAllPresent && policiesAllPresent;
+    return `
+    ${summaryBannerHtml}
+
+    <details class="app-fold" data-section="setup-images" ${isSectionOpen2("setup-images", true) ? "open" : ""}>
+      <summary>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="fold-chevron">&#9654;</span>
+          <span class="access-dot ${imagesFoldDot}"></span>
+          <span>Sandbox Container Images (${imagesPresentCount}/${imagesTotalCount})</span>
+        </div>
+        <span class="source-pill">&#8984; docker</span>
+      </summary>
+      <div class="app-fold-body">
+        ${imagesHtml}
+      </div>
+    </details>
+
+    <details class="app-fold" data-section="setup-prereqs" ${isSectionOpen2("setup-prereqs", true) ? "open" : ""}>
+      <summary>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="fold-chevron">&#9654;</span>
+          <span class="access-dot ${prereqAllOk ? "rw" : "deny"}"></span>
+          <span>Prerequisites &amp; Integration</span>
+        </div>
+        <span class="source-pill">&#8984; host-check</span>
+      </summary>
+      <div class="app-fold-body">
+        ${cliRowHtml}
+        ${gatewayRowHtml}
+        ${wrappersRowHtml}
+        ${policiesRowHtml}
+        ${syncRowHtml}
+        ${delegationRowHtml}
+        ${registryRowHtml}
+      </div>
+    </details>
+  `;
+  }
+
   // orca-plugin/src/panel/views/system-tab.ts
   function describeMountPath(mountPath, access, wsName, agentName) {
     if (mountPath === `/sandbox/${wsName}`) {
@@ -896,39 +1236,6 @@ button.small {
     const currentSb = (report.activeSandboxes || [])[0] || null;
     const isCurrentSbStopped = Boolean(currentSb && /stopped/i.test(currentSb.phase || ""));
     const isCurrentSbReady = Boolean(currentSb && /ready|running/i.test(currentSb.phase || ""));
-    const defaultEnabled = report.defaultSandboxEnabled === true;
-    const defaultModeControlHtml = `
-    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
-        <span style="font-size:11px;font-weight:600;color:var(--fg);">Default Sandbox State</span>
-        <span class="sub">Global default for new or unconfigured worktrees (override per worktree using the top <code class="mono">Sandbox</code> toggle).</span>
-      </div>
-      <select id="defaultSandboxModeSelect" style="max-width:150px;flex-shrink:0;" title="Default OpenShell sandbox state for unconfigured worktrees">
-        <option value="off" ${!defaultEnabled ? "selected" : ""}>Off (Host Mode)</option>
-        <option value="on" ${defaultEnabled ? "selected" : ""}>On (Enforced)</option>
-      </select>
-    </div>
-  `;
-    const idleSec = typeof report.sandboxIdleTimeoutSeconds === "number" ? report.sandboxIdleTimeoutSeconds : 300;
-    const presetIdleValues = [0, 60, 180, 300, 600, 900];
-    const customIdleOption = !presetIdleValues.includes(idleSec) ? `<option value="${idleSec}" selected>${idleSec}s (Custom)</option>` : "";
-    const idleControlHtml = `
-    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
-        <span style="font-size:11px;font-weight:600;color:var(--fg);">Auto-Pause When Idle</span>
-        <span class="sub">Per-tab setting: stops this tab's idle container while preserving <code class="mono">/sandbox</code> &amp; L7 policies; restarts automatically on next turn or command.</span>
-      </div>
-      <select id="idleTimeoutSelect" style="max-width:150px;flex-shrink:0;" title="Idle duration before this tab's sandbox container automatically pauses">
-        <option value="0" ${idleSec === 0 ? "selected" : ""}>Off (Always On)</option>
-        <option value="60" ${idleSec === 60 ? "selected" : ""}>1 minute</option>
-        <option value="180" ${idleSec === 180 ? "selected" : ""}>3 minutes</option>
-        <option value="300" ${idleSec === 300 ? "selected" : ""}>5 minutes</option>
-        <option value="600" ${idleSec === 600 ? "selected" : ""}>10 minutes</option>
-        <option value="900" ${idleSec === 900 ? "selected" : ""}>15 minutes</option>
-        ${customIdleOption}
-      </select>
-    </div>
-  `;
     const currentSbCardHtml = currentSb ? (() => {
       const sbDot = isCurrentSbReady ? "rw" : isCurrentSbStopped ? "ro" : "l7";
       const phaseLabel = isCurrentSbStopped ? "Paused" : currentSb.phase || "Active";
@@ -947,76 +1254,9 @@ button.small {
           </div>
         `;
     })() : `<div class="sub">No sandbox container running for this tab yet.</div>`;
-    const docReport = panelState.doctorReport;
-    const docChecksHtml = docReport ? `<div style="display:flex;flex-direction:column;gap:4px;padding:6px 8px;background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;">
-        ${docReport.checks.map((c) => {
-      const dot = c.status === "pass" ? "rw" : c.status === "warn" ? "l7" : "deny";
-      return `<div class="cmd-meta" style="align-items:center;justify-content:space-between;gap:8px;">
-              <div style="display:flex;align-items:center;gap:6px;min-width:0;">
-                <span class="access-dot ${dot}" title="${escapeHtml(c.status)}"></span>
-                <strong style="color:var(--fg);white-space:nowrap;">${escapeHtml(c.label)}:</strong>
-                <span class="sub" style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(c.detail)}</span>
-              </div>
-              <span class="badge ${c.status === "pass" ? "allow" : c.status === "warn" ? "warn" : "deny"}">${escapeHtml(c.status.toUpperCase())}</span>
-            </div>`;
-    }).join("")}
-      </div>` : "";
-    const doctorControlHtml = `
-    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
-        <span style="font-size:11px;font-weight:600;color:var(--fg);">System Health &amp; Registry</span>
-        <span class="sub">Verifies OpenShell gateway, host wrappers, base L7 policies, and reconciles stale session entries.</span>
-      </div>
-      <button id="runDoctorBtn" class="copy-btn" ${panelState.runningDoctor ? "disabled" : ""} title="Run OpenShell environment diagnostics and prune stale registry entries">
-        ${panelState.runningDoctor ? "Checking..." : "Run Doctor"}
-      </button>
-    </div>
-    ${docChecksHtml}
-  `;
-    const imgReport = report.sandboxImages;
-    const imagesHtml = imgReport ? (() => {
-      const rows = (imgReport.images || []).map((img) => {
-        const dot = img.present ? "rw" : "deny";
-        const badgeClass = img.present ? "allow" : "deny";
-        const statusText = img.present ? "READY" : "MISSING";
-        const sizeHtml = img.size ? `<span class="source-pill" style="font-size:10px;">${escapeHtml(img.size)}</span>` : "";
-        const tooltip = `${img.name}\n${img.role}\nStatus: ${statusText}${img.size ? ` (${img.size})` : ""}${img.createdAt ? `\nCreated: ${img.createdAt}` : ""}`;
-        return `
-            <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
-              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-                <span class="access-dot ${dot}" title="${img.present ? "Installed" : "Missing"}"></span>
-                <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
-                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(img.name)}</span>
-                  <span class="sub" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(img.role)}</span>
-                </div>
-              </div>
-              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-                ${sizeHtml}
-                <span class="badge ${badgeClass}">${statusText}</span>
-              </div>
-            </div>
-          `;
-      }).join("");
-      const missingAlert = !imgReport.dockerAvailable ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);flex-direction:column;align-items:flex-start;gap:4px;">
-              <div style="display:flex;align-items:center;gap:6px;">
-                <span class="access-dot deny"></span>
-                <strong style="color:var(--danger);font-size:11.5px;">Docker Daemon Not Reachable</strong>
-              </div>
-              <span class="sub" style="color:var(--fg);">${escapeHtml(imgReport.error || "Cannot communicate with Docker. Ensure Docker is running.")}</span>
-            </div>` : !imgReport.allPresent ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-                <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
-                  <strong style="color:var(--danger);font-size:11.5px;">Missing Required Sandbox Image(s)</strong>
-                  <span class="sub">Run <code class="mono">./install.sh</code> in the repository root to build required base and agent images.</span>
-                </div>
-                <button class="copy-btn primary" data-copy="./install.sh" title="Copy install command to clipboard">Copy ./install.sh</button>
-              </div>` : "";
-      return `${missingAlert}${rows}`;
-    })() : `<div class="sub">No sandbox container image status available.</div>`;
-    const imagesPresentCount = imgReport ? imgReport.images.filter((i) => i.present).length : 0;
-    const imagesTotalCount = imgReport?.images?.length || 4;
-    const imagesFoldDot = imgReport?.allPresent ? "rw" : "deny";
+    const isSectionOpen3 = (sec) => !panelState.closedSections.has(sec);
     return `
-    <details class="app-fold" data-section="sys-sb" open>
+    <details class="app-fold" data-section="sys-sb" ${isSectionOpen3("sys-sb") ? "open" : ""}>
       <summary>
         <div style="display:flex;align-items:center;gap:8px;">
           <span class="fold-chevron">&#9654;</span>
@@ -1027,27 +1267,10 @@ button.small {
       </summary>
       <div class="app-fold-body">
         ${currentSbCardHtml}
-        ${defaultModeControlHtml}
-        ${idleControlHtml}
-        ${doctorControlHtml}
       </div>
     </details>
 
-    <details class="app-fold" data-section="sys-images" ${panelState.openSections.has("sys-images") || !panelState.openSections.has("sys-images-closed") ? "open" : ""}>
-      <summary>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span class="fold-chevron">&#9654;</span>
-          <span class="access-dot ${imagesFoldDot}"></span>
-          <span>Sandbox Container Images (${imagesPresentCount}/${imagesTotalCount})</span>
-        </div>
-        <span class="source-pill">&#8984; docker</span>
-      </summary>
-      <div class="app-fold-body">
-        ${imagesHtml}
-      </div>
-    </details>
-
-    <details class="app-fold" data-section="sys-fs" ${panelState.openSections.has("sys-fs") || !panelState.openSections.has("sys-fs-closed") ? "open" : ""}>
+    <details class="app-fold" data-section="sys-fs" ${isSectionOpen3("sys-fs") ? "open" : ""}>
       <summary>
         <div style="display:flex;align-items:center;gap:8px;">
           <span class="fold-chevron">&#9654;</span>
@@ -1061,7 +1284,7 @@ button.small {
       </div>
     </details>
 
-    <details class="app-fold" data-section="sys-vars" ${panelState.openSections.has("sys-vars") || !panelState.openSections.has("sys-vars-closed") ? "open" : ""}>
+    <details class="app-fold" data-section="sys-vars" ${isSectionOpen3("sys-vars") ? "open" : ""}>
       <summary>
         <div style="display:flex;align-items:center;gap:8px;">
           <span class="fold-chevron">&#9654;</span>
@@ -1147,7 +1370,10 @@ button.small {
     const imageAlarmTitle = document.getElementById("imageAlarmTitle");
     const imageAlarmDesc = document.getElementById("imageAlarmDesc");
     const imageAlarmCountBadge = document.getElementById("imageAlarmCountBadge");
-    const systemAlarmBadge = document.getElementById("systemAlarmBadge");
+    const setupAlarmBadge = document.getElementById("setupAlarmBadge");
+    const missingWrappersCount = (report.setup?.wrappers || []).filter((w) => !w.present).length;
+    const missingPoliciesCount = (report.setup?.policies || []).filter((p) => !p.present).length;
+    const hasSetupIssue = Boolean(hasImageAlarm || sbEnabled && (missingWrappersCount > 0 || missingPoliciesCount > 0 || report.setup?.openshellInstalled === false) || panelState.doctorReport && !panelState.doctorReport.ok);
     if (imageAlarmNotice) {
       imageAlarmNotice.style.display = hasImageAlarm ? "flex" : "none";
     }
@@ -1174,8 +1400,8 @@ button.small {
         }
       }
     }
-    if (systemAlarmBadge) {
-      systemAlarmBadge.style.display = hasImageAlarm ? "inline-flex" : "none";
+    if (setupAlarmBadge) {
+      setupAlarmBadge.style.display = hasSetupIssue ? "inline-flex" : "none";
     }
     const projLabel = document.getElementById("projectLabel");
     if (projLabel)
@@ -1197,10 +1423,6 @@ button.small {
       const sessionState = activeSession ? activeSession.state : runningCount > 0 ? "sandboxed" : pausedCount > 0 ? "paused" : "ready";
       stateBadge.textContent = sessionState.toUpperCase();
       stateBadge.className = "badge " + (sessionState === "working" || sessionState === "running" || runningCount > 0 ? "allow" : "neutral");
-    }
-    const egressCountEl = document.getElementById("egressCount");
-    if (egressCountEl) {
-      egressCountEl.textContent = String(agentObj?.endpoints?.length || 0);
     }
   }
   async function applyL7PolicyRule(payload, statusElId) {
@@ -1292,7 +1514,7 @@ button.small {
             <span class="source-pill">&#8984; ${escapeHtml(res.l7Suggestion.binary)}</span>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Allow for this session only and tag Temporary in Sandbox Egress">Allow Temporarily</button>
+            <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Allow for this session only and tag Temporary in Egress">Allow Temporarily</button>
             <button class="copy-btn primary quick-l7-btn" data-l7-scope="workspace" title="Save to project rules (.agents/policies/l7-custom.json) &amp; apply live">Allow (Project)</button>
             <button class="copy-btn quick-l7-btn" data-l7-scope="global" title="Save to ~/.agents/orca-openshell-policies/${escapeHtml(report.currentAgent)}.json &amp; apply live">Allow Global</button>
           </div>
@@ -1355,12 +1577,14 @@ button.small {
     try {
       const res = await window.orca.plugin.request("getPolicyReport", {});
       const prev = panelState.currentReport;
-      const changedContext = !prev || prev.sandboxEnabled !== res.sandboxEnabled || prev.defaultSandboxEnabled !== res.defaultSandboxEnabled || prev.sandboxIdleTimeoutSeconds !== res.sandboxIdleTimeoutSeconds || prev.selectedWorkspace.path !== res.selectedWorkspace.path || prev.currentAgent !== res.currentAgent || sandboxesSignature(prev) !== sandboxesSignature(res) || endpointsSignature(prev) !== endpointsSignature(res);
+      const changedContext = !prev || prev.sandboxEnabled !== res.sandboxEnabled || prev.defaultSandboxEnabled !== res.defaultSandboxEnabled || prev.sandboxIdleTimeoutSeconds !== res.sandboxIdleTimeoutSeconds || prev.selectedWorkspace.path !== res.selectedWorkspace.path || prev.currentAgent !== res.currentAgent || sandboxesSignature(prev) !== sandboxesSignature(res) || endpointsSignature(prev) !== endpointsSignature(res) || setupSignature(prev) !== setupSignature(res);
       panelState.currentReport = res;
       renderHeader();
       const activeElId = document.activeElement?.id || "";
       const isTypingInFilter = activeElId === "ruleSearch" || activeElId === "egressSearch";
-      if (changedContext && !isTypingInFilter || !document.getElementById("ruleSearch") && !document.getElementById("egressSearch") && panelState.activeTab !== "system") {
+      const tabEl = document.getElementById("tabContent");
+      const isEmptyTab = !tabEl || !tabEl.innerHTML.trim();
+      if (changedContext && !isTypingInFilter || isEmptyTab) {
         renderActiveTab();
       }
       const cmd = getInputValue("cmdInput").trim();
@@ -1425,6 +1649,41 @@ button.small {
       }
     }
   }
+  async function triggerDoctorCheck() {
+    if (panelState.runningDoctor)
+      return;
+    panelState.runningDoctor = true;
+    renderActiveTab();
+    try {
+      const report = panelState.currentReport;
+      const res = await window.orca.plugin.request("runDoctor", {
+        workspacePath: report?.selectedWorkspace?.path,
+        agent: report?.currentAgent
+      });
+      if (res?.doctor) {
+        panelState.doctorReport = res.doctor;
+      }
+      if (res?.report) {
+        panelState.currentReport = res.report;
+        renderHeader();
+      }
+    } catch {
+    } finally {
+      panelState.runningDoctor = false;
+      renderHeader();
+      renderActiveTab();
+    }
+  }
+  function switchToTab(tab) {
+    panelState.activeTab = tab;
+    document.querySelectorAll(".tab").forEach((t) => {
+      t.classList.toggle("active", t.dataset.tab === tab);
+    });
+    renderActiveTab();
+    if (tab === "setup" && !panelState.doctorReport && !panelState.runningDoctor) {
+      triggerDoctorCheck();
+    }
+  }
   function renderActiveTab() {
     if (!panelState.currentReport)
       return;
@@ -1433,8 +1692,12 @@ button.small {
       return;
     if (panelState.activeTab === "egress")
       container.innerHTML = renderEgressTab();
-    else
+    else if (panelState.activeTab === "filesystem")
       container.innerHTML = renderSystemTab();
+    else if (panelState.activeTab === "setup")
+      container.innerHTML = renderSetupTab();
+    else
+      container.innerHTML = renderSettingsTab();
     const defaultSandboxModeSelect = document.getElementById("defaultSandboxModeSelect");
     if (defaultSandboxModeSelect) {
       defaultSandboxModeSelect.addEventListener("change", async (e) => {
@@ -1485,29 +1748,8 @@ button.small {
     }
     const runDoctorBtn = document.getElementById("runDoctorBtn");
     if (runDoctorBtn) {
-      runDoctorBtn.addEventListener("click", async () => {
-        if (panelState.runningDoctor)
-          return;
-        panelState.runningDoctor = true;
-        renderActiveTab();
-        try {
-          const report = panelState.currentReport;
-          const res = await window.orca.plugin.request("runDoctor", {
-            workspacePath: report?.selectedWorkspace?.path,
-            agent: report?.currentAgent
-          });
-          if (res?.doctor) {
-            panelState.doctorReport = res.doctor;
-          }
-          if (res?.report) {
-            panelState.currentReport = res.report;
-            renderHeader();
-          }
-        } catch {
-        } finally {
-          panelState.runningDoctor = false;
-          renderActiveTab();
-        }
+      runDoctorBtn.addEventListener("click", () => {
+        triggerDoctorCheck();
       });
     }
     container.querySelectorAll("details.app-fold").forEach((el) => {
@@ -1521,10 +1763,13 @@ button.small {
         }
         const sec = el.dataset.section;
         if (sec) {
-          if (el.open)
+          if (el.open) {
             panelState.openSections.add(sec);
-          else
+            panelState.closedSections.delete(sec);
+          } else {
             panelState.openSections.delete(sec);
+            panelState.closedSections.add(sec);
+          }
         }
       });
     });
@@ -1740,12 +1985,14 @@ button.small {
         if (cmdInput)
           cmdInput.value = cmd;
         runCommandCheck(cmd, false);
-      } else if (target.classList.contains("tab")) {
-        document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
-        target.classList.add("active");
-        panelState.activeTab = target.dataset.tab || "egress";
-        renderActiveTab();
+      } else if (target.closest(".tab")) {
+        const tabBtn = target.closest(".tab");
+        const tab = tabBtn?.dataset.tab || "egress";
+        switchToTab(tab);
       }
+    });
+    document.getElementById("openSetupTabBtn")?.addEventListener("click", () => {
+      switchToTab("setup");
     });
     document.getElementById("sandboxToggleBtn")?.addEventListener("click", () => {
       toggleSandboxMode();

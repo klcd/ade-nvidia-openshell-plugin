@@ -109,42 +109,6 @@ export function renderSystemTab(): string {
   const currentSb = (report.activeSandboxes || [])[0] || null
   const isCurrentSbStopped = Boolean(currentSb && /stopped/i.test(currentSb.phase || ''))
   const isCurrentSbReady = Boolean(currentSb && /ready|running/i.test(currentSb.phase || ''))
-  const defaultEnabled = report.defaultSandboxEnabled === true
-  const defaultModeControlHtml = `
-    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
-        <span style="font-size:11px;font-weight:600;color:var(--fg);">Default Sandbox State</span>
-        <span class="sub">Global default for new or unconfigured worktrees (override per worktree using the top <code class="mono">Sandbox</code> toggle).</span>
-      </div>
-      <select id="defaultSandboxModeSelect" style="max-width:150px;flex-shrink:0;" title="Default OpenShell sandbox state for unconfigured worktrees">
-        <option value="off" ${!defaultEnabled ? 'selected' : ''}>Off (Host Mode)</option>
-        <option value="on" ${defaultEnabled ? 'selected' : ''}>On (Enforced)</option>
-      </select>
-    </div>
-  `
-  const idleSec =
-    typeof report.sandboxIdleTimeoutSeconds === 'number' ? report.sandboxIdleTimeoutSeconds : 300
-  const presetIdleValues = [0, 60, 180, 300, 600, 900]
-  const customIdleOption = !presetIdleValues.includes(idleSec)
-    ? `<option value="${idleSec}" selected>${idleSec}s (Custom)</option>`
-    : ''
-  const idleControlHtml = `
-    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
-        <span style="font-size:11px;font-weight:600;color:var(--fg);">Auto-Pause When Idle</span>
-        <span class="sub">Per-tab setting: stops this tab's idle container while preserving <code class="mono">/sandbox</code> &amp; L7 policies; restarts automatically on next turn or command.</span>
-      </div>
-      <select id="idleTimeoutSelect" style="max-width:150px;flex-shrink:0;" title="Idle duration before this tab's sandbox container automatically pauses">
-        <option value="0" ${idleSec === 0 ? 'selected' : ''}>Off (Always On)</option>
-        <option value="60" ${idleSec === 60 ? 'selected' : ''}>1 minute</option>
-        <option value="180" ${idleSec === 180 ? 'selected' : ''}>3 minutes</option>
-        <option value="300" ${idleSec === 300 ? 'selected' : ''}>5 minutes</option>
-        <option value="600" ${idleSec === 600 ? 'selected' : ''}>10 minutes</option>
-        <option value="900" ${idleSec === 900 ? 'selected' : ''}>15 minutes</option>
-        ${customIdleOption}
-      </select>
-    </div>
-  `
 
   const currentSbCardHtml = currentSb
     ? (() => {
@@ -169,96 +133,10 @@ export function renderSystemTab(): string {
       })()
     : `<div class="sub">No sandbox container running for this tab yet.</div>`
 
-  const docReport = panelState.doctorReport
-  const docChecksHtml = docReport
-    ? `<div style="display:flex;flex-direction:column;gap:4px;padding:6px 8px;background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;">
-        ${docReport.checks
-          .map(c => {
-            const dot = c.status === 'pass' ? 'rw' : c.status === 'warn' ? 'l7' : 'deny'
-            return `<div class="cmd-meta" style="align-items:center;justify-content:space-between;gap:8px;">
-              <div style="display:flex;align-items:center;gap:6px;min-width:0;">
-                <span class="access-dot ${dot}" title="${escapeHtml(c.status)}"></span>
-                <strong style="color:var(--fg);white-space:nowrap;">${escapeHtml(c.label)}:</strong>
-                <span class="sub" style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(c.detail)}</span>
-              </div>
-              <span class="badge ${c.status === 'pass' ? 'allow' : c.status === 'warn' ? 'warn' : 'deny'}">${escapeHtml(c.status.toUpperCase())}</span>
-            </div>`
-          })
-          .join('')}
-      </div>`
-    : ''
-
-  const doctorControlHtml = `
-    <div class="cmd-row" style="justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-      <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
-        <span style="font-size:11px;font-weight:600;color:var(--fg);">System Health &amp; Registry</span>
-        <span class="sub">Verifies OpenShell gateway, host wrappers, base L7 policies, and reconciles stale session entries.</span>
-      </div>
-      <button id="runDoctorBtn" class="copy-btn" ${panelState.runningDoctor ? 'disabled' : ''} title="Run OpenShell environment diagnostics and prune stale registry entries">
-        ${panelState.runningDoctor ? 'Checking...' : 'Run Doctor'}
-      </button>
-    </div>
-    ${docChecksHtml}
-  `
-
-  const imgReport = report.sandboxImages
-  const imagesHtml = imgReport
-    ? (() => {
-        const rows = (imgReport.images || [])
-          .map(img => {
-            const dot = img.present ? 'rw' : 'deny'
-            const badgeClass = img.present ? 'allow' : 'deny'
-            const statusText = img.present ? 'READY' : 'MISSING'
-            const sizeHtml = img.size
-              ? `<span class="source-pill" style="font-size:10px;">${escapeHtml(img.size)}</span>`
-              : ''
-            const tooltip = `${img.name}\n${img.role}\nStatus: ${statusText}${img.size ? ` (${img.size})` : ''}${img.createdAt ? `\nCreated: ${img.createdAt}` : ''}`
-            return `
-            <div class="cmd-row" data-tooltip="${escapeHtml(tooltip)}">
-              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-                <span class="access-dot ${dot}" title="${img.present ? 'Installed' : 'Missing'}"></span>
-                <div style="display:flex;flex-direction:column;gap:1px;min-width:0;">
-                  <span class="cmd-code" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(img.name)}</span>
-                  <span class="sub" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(img.role)}</span>
-                </div>
-              </div>
-              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-                ${sizeHtml}
-                <span class="badge ${badgeClass}">${statusText}</span>
-              </div>
-            </div>
-          `
-          })
-          .join('')
-
-        const missingAlert = !imgReport.dockerAvailable
-          ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);flex-direction:column;align-items:flex-start;gap:4px;">
-              <div style="display:flex;align-items:center;gap:6px;">
-                <span class="access-dot deny"></span>
-                <strong style="color:var(--danger);font-size:11.5px;">Docker Daemon Not Reachable</strong>
-              </div>
-              <span class="sub" style="color:var(--fg);">${escapeHtml(imgReport.error || 'Cannot communicate with Docker. Ensure Docker is running.')}</span>
-            </div>`
-          : !imgReport.allPresent
-            ? `<div class="cmd-row" style="background:var(--danger-bg);border-color:rgba(248,81,73,0.35);justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-                <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
-                  <strong style="color:var(--danger);font-size:11.5px;">Missing Required Sandbox Image(s)</strong>
-                  <span class="sub">Run <code class="mono">./install.sh</code> in the repository root to build required base and agent images.</span>
-                </div>
-                <button class="copy-btn primary" data-copy="./install.sh" title="Copy install command to clipboard">Copy ./install.sh</button>
-              </div>`
-            : ''
-
-        return `${missingAlert}${rows}`
-      })()
-    : `<div class="sub">No sandbox container image status available.</div>`
-
-  const imagesPresentCount = imgReport ? imgReport.images.filter(i => i.present).length : 0
-  const imagesTotalCount = imgReport?.images?.length || 4
-  const imagesFoldDot = imgReport?.allPresent ? 'rw' : 'deny'
+  const isSectionOpen = (sec: string) => !panelState.closedSections.has(sec)
 
   return `
-    <details class="app-fold" data-section="sys-sb" open>
+    <details class="app-fold" data-section="sys-sb" ${isSectionOpen('sys-sb') ? 'open' : ''}>
       <summary>
         <div style="display:flex;align-items:center;gap:8px;">
           <span class="fold-chevron">&#9654;</span>
@@ -269,27 +147,10 @@ export function renderSystemTab(): string {
       </summary>
       <div class="app-fold-body">
         ${currentSbCardHtml}
-        ${defaultModeControlHtml}
-        ${idleControlHtml}
-        ${doctorControlHtml}
       </div>
     </details>
 
-    <details class="app-fold" data-section="sys-images" ${panelState.openSections.has('sys-images') || !panelState.openSections.has('sys-images-closed') ? 'open' : ''}>
-      <summary>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span class="fold-chevron">&#9654;</span>
-          <span class="access-dot ${imagesFoldDot}"></span>
-          <span>Sandbox Container Images (${imagesPresentCount}/${imagesTotalCount})</span>
-        </div>
-        <span class="source-pill">&#8984; docker</span>
-      </summary>
-      <div class="app-fold-body">
-        ${imagesHtml}
-      </div>
-    </details>
-
-    <details class="app-fold" data-section="sys-fs" ${panelState.openSections.has('sys-fs') || !panelState.openSections.has('sys-fs-closed') ? 'open' : ''}>
+    <details class="app-fold" data-section="sys-fs" ${isSectionOpen('sys-fs') ? 'open' : ''}>
       <summary>
         <div style="display:flex;align-items:center;gap:8px;">
           <span class="fold-chevron">&#9654;</span>
@@ -303,7 +164,7 @@ export function renderSystemTab(): string {
       </div>
     </details>
 
-    <details class="app-fold" data-section="sys-vars" ${panelState.openSections.has('sys-vars') || !panelState.openSections.has('sys-vars-closed') ? 'open' : ''}>
+    <details class="app-fold" data-section="sys-vars" ${isSectionOpen('sys-vars') ? 'open' : ''}>
       <summary>
         <div style="display:flex;align-items:center;gap:8px;">
           <span class="fold-chevron">&#9654;</span>

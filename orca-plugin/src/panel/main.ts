@@ -5,8 +5,16 @@ import type {
   PolicyInspectionReport,
 } from '../types.ts'
 import { panelState, type PanelTab } from './state.ts'
-import { copyText, endpointsSignature, escapeHtml, sandboxesSignature } from './utils.ts'
+import {
+  copyText,
+  endpointsSignature,
+  escapeHtml,
+  sandboxesSignature,
+  setupSignature,
+} from './utils.ts'
 import { renderEgressTab } from './views/egress-tab.ts'
+import { renderSettingsTab } from './views/settings-tab.ts'
+import { renderSetupTab } from './views/setup-tab.ts'
 import { renderSystemTab } from './views/system-tab.ts'
 
 function getInputValue(id: string): string {
@@ -92,7 +100,18 @@ function renderHeader(): void {
   const imageAlarmTitle = document.getElementById('imageAlarmTitle')
   const imageAlarmDesc = document.getElementById('imageAlarmDesc')
   const imageAlarmCountBadge = document.getElementById('imageAlarmCountBadge')
-  const systemAlarmBadge = document.getElementById('systemAlarmBadge')
+  const setupAlarmBadge = document.getElementById('setupAlarmBadge')
+
+  const missingWrappersCount = (report.setup?.wrappers || []).filter(w => !w.present).length
+  const missingPoliciesCount = (report.setup?.policies || []).filter(p => !p.present).length
+  const hasSetupIssue = Boolean(
+    hasImageAlarm ||
+      (sbEnabled &&
+        (missingWrappersCount > 0 ||
+          missingPoliciesCount > 0 ||
+          report.setup?.openshellInstalled === false)) ||
+      (panelState.doctorReport && !panelState.doctorReport.ok)
+  )
 
   if (imageAlarmNotice) {
     imageAlarmNotice.style.display = hasImageAlarm ? 'flex' : 'none'
@@ -120,8 +139,8 @@ function renderHeader(): void {
       }
     }
   }
-  if (systemAlarmBadge) {
-    systemAlarmBadge.style.display = hasImageAlarm ? 'inline-flex' : 'none'
+  if (setupAlarmBadge) {
+    setupAlarmBadge.style.display = hasSetupIssue ? 'inline-flex' : 'none'
   }
 
   const projLabel = document.getElementById('projectLabel')
@@ -152,11 +171,6 @@ function renderHeader(): void {
       (sessionState === 'working' || sessionState === 'running' || runningCount > 0
         ? 'allow'
         : 'neutral')
-  }
-
-  const egressCountEl = document.getElementById('egressCount')
-  if (egressCountEl) {
-    egressCountEl.textContent = String(agentObj?.endpoints?.length || 0)
   }
 }
 
@@ -270,7 +284,7 @@ async function runCommandCheck(
             <span class="source-pill">&#8984; ${escapeHtml(res.l7Suggestion.binary)}</span>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Allow for this session only and tag Temporary in Sandbox Egress">Allow Temporarily</button>
+            <button class="copy-btn quick-l7-btn" data-l7-scope="session" title="Allow for this session only and tag Temporary in Egress">Allow Temporarily</button>
             <button class="copy-btn primary quick-l7-btn" data-l7-scope="workspace" title="Save to project rules (.agents/policies/l7-custom.json) &amp; apply live">Allow (Project)</button>
             <button class="copy-btn quick-l7-btn" data-l7-scope="global" title="Save to ~/.agents/orca-openshell-policies/${escapeHtml(report.currentAgent)}.json &amp; apply live">Allow Global</button>
           </div>
@@ -351,18 +365,16 @@ async function loadReport(): Promise<void> {
       prev.selectedWorkspace.path !== res.selectedWorkspace.path ||
       prev.currentAgent !== res.currentAgent ||
       sandboxesSignature(prev) !== sandboxesSignature(res) ||
-      endpointsSignature(prev) !== endpointsSignature(res)
+      endpointsSignature(prev) !== endpointsSignature(res) ||
+      setupSignature(prev) !== setupSignature(res)
 
     panelState.currentReport = res
     renderHeader()
     const activeElId = document.activeElement?.id || ''
     const isTypingInFilter = activeElId === 'ruleSearch' || activeElId === 'egressSearch'
-    if (
-      (changedContext && !isTypingInFilter) ||
-      (!document.getElementById('ruleSearch') &&
-        !document.getElementById('egressSearch') &&
-        panelState.activeTab !== 'system')
-    ) {
+    const tabEl = document.getElementById('tabContent')
+    const isEmptyTab = !tabEl || !tabEl.innerHTML.trim()
+    if ((changedContext && !isTypingInFilter) || isEmptyTab) {
       renderActiveTab()
     }
     const cmd = getInputValue('cmdInput').trim()
@@ -432,13 +444,50 @@ async function toggleSandboxMode(): Promise<void> {
   }
 }
 
+async function triggerDoctorCheck(): Promise<void> {
+  if (panelState.runningDoctor) return
+  panelState.runningDoctor = true
+  renderActiveTab()
+  try {
+    const report = panelState.currentReport
+    const res = (await window.orca.plugin.request('runDoctor', {
+      workspacePath: report?.selectedWorkspace?.path,
+      agent: report?.currentAgent,
+    })) as { doctor?: any; report?: PolicyInspectionReport } | null
+    if (res?.doctor) {
+      panelState.doctorReport = res.doctor
+    }
+    if (res?.report) {
+      panelState.currentReport = res.report
+      renderHeader()
+    }
+  } catch {} finally {
+    panelState.runningDoctor = false
+    renderHeader()
+    renderActiveTab()
+  }
+}
+
+function switchToTab(tab: PanelTab): void {
+  panelState.activeTab = tab
+  document.querySelectorAll<HTMLElement>('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tab)
+  })
+  renderActiveTab()
+  if (tab === 'setup' && !panelState.doctorReport && !panelState.runningDoctor) {
+    void triggerDoctorCheck()
+  }
+}
+
 function renderActiveTab(): void {
   if (!panelState.currentReport) return
   const container = document.getElementById('tabContent')
   if (!container) return
 
   if (panelState.activeTab === 'egress') container.innerHTML = renderEgressTab()
-  else container.innerHTML = renderSystemTab()
+  else if (panelState.activeTab === 'filesystem') container.innerHTML = renderSystemTab()
+  else if (panelState.activeTab === 'setup') container.innerHTML = renderSetupTab()
+  else container.innerHTML = renderSettingsTab()
 
   const defaultSandboxModeSelect = document.getElementById(
     'defaultSandboxModeSelect'
@@ -492,27 +541,8 @@ function renderActiveTab(): void {
 
   const runDoctorBtn = document.getElementById('runDoctorBtn') as HTMLButtonElement | null
   if (runDoctorBtn) {
-    runDoctorBtn.addEventListener('click', async () => {
-      if (panelState.runningDoctor) return
-      panelState.runningDoctor = true
-      renderActiveTab()
-      try {
-        const report = panelState.currentReport
-        const res = (await window.orca.plugin.request('runDoctor', {
-          workspacePath: report?.selectedWorkspace?.path,
-          agent: report?.currentAgent,
-        })) as { doctor?: any; report?: PolicyInspectionReport } | null
-        if (res?.doctor) {
-          panelState.doctorReport = res.doctor
-        }
-        if (res?.report) {
-          panelState.currentReport = res.report
-          renderHeader()
-        }
-      } catch {} finally {
-        panelState.runningDoctor = false
-        renderActiveTab()
-      }
+    runDoctorBtn.addEventListener('click', () => {
+      void triggerDoctorCheck()
     })
   }
 
@@ -525,8 +555,13 @@ function renderActiveTab(): void {
       }
       const sec = el.dataset.section
       if (sec) {
-        if (el.open) panelState.openSections.add(sec)
-        else panelState.openSections.delete(sec)
+        if (el.open) {
+          panelState.openSections.add(sec)
+          panelState.closedSections.delete(sec)
+        } else {
+          panelState.openSections.delete(sec)
+          panelState.closedSections.add(sec)
+        }
       }
     })
   })
@@ -757,14 +792,16 @@ function bootstrapPanel(): void {
       const cmdInput = document.getElementById('cmdInput') as HTMLInputElement | null
       if (cmdInput) cmdInput.value = cmd
       void runCommandCheck(cmd, false)
-    } else if (target.classList.contains('tab')) {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'))
-      target.classList.add('active')
-      panelState.activeTab = (target.dataset.tab || 'egress') as PanelTab
-      renderActiveTab()
+    } else if (target.closest('.tab')) {
+      const tabBtn = target.closest<HTMLElement>('.tab')
+      const tab = (tabBtn?.dataset.tab || 'egress') as PanelTab
+      switchToTab(tab)
     }
   })
 
+  document.getElementById('openSetupTabBtn')?.addEventListener('click', () => {
+    switchToTab('setup')
+  })
   document.getElementById('sandboxToggleBtn')?.addEventListener('click', () => {
     void toggleSandboxMode()
   })

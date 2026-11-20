@@ -30,3 +30,13 @@ export function sandboxesSignature(rep: PolicyInspectionReport | null): string {
   const sbs = rep?.activeSandboxes || []
   return sbs.map(s => `${s.name}:${s.phase || ''}`).join('|')
 }
+
+export function setupSignature(rep: PolicyInspectionReport | null): string {
+  if (!rep) return ''
+  const imgs = (rep.sandboxImages?.images || [])
+    .map(i => `${i.name}:${i.present ? '1' : '0'}:${i.size || ''}`)
+    .join('|')
+  const wraps = (rep.setup?.wrappers || []).map(w => (w.present ? '1' : '0')).join('')
+  const pols = (rep.setup?.policies || []).map(p => (p.present ? '1' : '0')).join('')
+  return `${rep.sandboxImages?.dockerAvailable ? '1' : '0'}:${imgs}:${wraps}:${pols}`
+}

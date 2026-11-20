@@ -147,6 +147,21 @@ export interface SandboxImagesReport {
   error?: string
 }
 
+export interface SetupFileCheckItem {
+  name: string
+  path: string
+  present: boolean
+}
+
+export interface SetupReadinessSummary {
+  binDir: string
+  policyDir: string
+  openshellBinary: string
+  openshellInstalled: boolean
+  wrappers: SetupFileCheckItem[]
+  policies: SetupFileCheckItem[]
+}
+
 export interface PolicyInspectionReport {
   generatedAt: string
   sandboxEnabled: boolean
@@ -154,6 +169,7 @@ export interface PolicyInspectionReport {
   sandboxInheritedFrom: string | null
   sandboxIdleTimeoutSeconds: number
   sandboxImages: SandboxImagesReport
+  setup: SetupReadinessSummary
   selectedWorkspace: WorkspaceEntry
   currentAgent: 'claude' | 'codex' | 'antigravity'
   activeAgentSessions: ActiveAgentSessionInfo[]

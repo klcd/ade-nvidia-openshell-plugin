@@ -10,6 +10,7 @@ import type {
   NetworkEndpointRule,
   ParsedOpenShellPolicy,
   PolicyInspectionReport,
+  SetupReadinessSummary,
 } from '../types.ts'
 import {
   discoverCurrentOrcaContext,
@@ -27,6 +28,7 @@ import {
   listActiveSandboxes,
   refreshActiveSandboxesCache,
   refreshSandboxImagesCache,
+  resolveOpenShellBinary,
 } from '../sandbox/sandbox-control.ts'
 import {
   getDefaultSandboxEnabled,
@@ -546,6 +548,28 @@ export function buildPolicyReport(options?: {
   )
   const defaultSandboxEnabled = getDefaultSandboxEnabled(homeDir)
 
+  const openshellBinary = resolveOpenShellBinary(homeDir)
+  let openshellInstalled = openshellBinary !== 'openshell' && fs.existsSync(openshellBinary)
+  if (!openshellInstalled && openshellBinary === 'openshell') {
+    openshellInstalled = false
+  }
+  const expectedWrappers = ['agent-box', 'claude-box', 'codex-box', 'agy-box', 'orca-delegation']
+  const expectedPolicies = ['claude.json', 'codex.json', 'antigravity.json']
+  const setup: SetupReadinessSummary = {
+    binDir,
+    policyDir: orcaPolicyDir,
+    openshellBinary,
+    openshellInstalled,
+    wrappers: expectedWrappers.map(name => {
+      const target = path.join(binDir, name)
+      return { name, path: target, present: fs.existsSync(target) }
+    }),
+    policies: expectedPolicies.map(name => {
+      const target = path.join(orcaPolicyDir, name)
+      return { name, path: target, present: fs.existsSync(target) }
+    }),
+  }
+
   return {
     generatedAt: new Date().toISOString(),
     sandboxEnabled: sandboxMode.enabled,
@@ -553,6 +577,7 @@ export function buildPolicyReport(options?: {
     sandboxInheritedFrom: sandboxMode.inheritedFrom,
     sandboxIdleTimeoutSeconds,
     sandboxImages: getSandboxImagesReport(homeDir),
+    setup,
     selectedWorkspace,
     currentAgent,
     activeAgentSessions: context.activeAgentSessions,

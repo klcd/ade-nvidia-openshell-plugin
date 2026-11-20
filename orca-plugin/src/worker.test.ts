@@ -818,7 +818,7 @@ test('inspects sandbox container images, parses docker output, and reports image
     'openshell-codex:latest',
   ])
 
-  // 3. Verify PolicyInspectionReport includes sandboxImages report
+  // 3. Verify PolicyInspectionReport includes sandboxImages and setup readiness reports
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-images-report-test-'))
   try {
     const report = buildPolicyReport({ workspacePath: dir, agent: 'antigravity', homeDir: dir })
@@ -827,6 +827,12 @@ test('inspects sandbox container images, parses docker output, and reports image
     assert.equal(report.sandboxImages.images.length, 4)
     assert.ok(typeof report.sandboxImages.allPresent === 'boolean')
     assert.ok(Array.isArray(report.sandboxImages.missingImages))
+
+    assert.ok(report.setup, 'PolicyInspectionReport must contain setup readiness summary')
+    assert.equal(report.setup.wrappers.length, 5)
+    assert.equal(report.setup.policies.length, 3)
+    assert.equal(typeof report.setup.openshellBinary, 'string')
+    assert.equal(typeof report.setup.openshellInstalled, 'boolean')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

@@ -6,7 +6,7 @@
 > **For Orca Catalog Maintainers & Security Reviewers**:
 > Please refer to [`REVIEW_GUIDE.md`](REVIEW_GUIDE.md) for the 30-second audit summary, zero-network-call verification, subprocess boundary breakdown, and unit test reproduction instructions.
 
-`local.openshell-bridge` (`v0.4.0`, part of `ade-nvidia-openshell-plugin`) is an Orca `1.4.248+` plugin that integrates **NVIDIA OpenShell** disposable Linux sandboxes with Orca **Terminal Mode**, **Structured Chat Mode**, **Scoped Subagent Orchestration**, **L7 Network Egress Popups**, and an interactive **OpenShell Policies** sidebar inspector.
+`local.openshell-bridge` (`v0.4.1`, part of `ade-nvidia-openshell-plugin`) is an Orca `1.4.248+` plugin that integrates **NVIDIA OpenShell** disposable Linux sandboxes with Orca **Terminal Mode**, **Structured Chat Mode**, **Scoped Subagent Orchestration**, **L7 Network Egress Popups**, and an interactive **OpenShell Policies** sidebar inspector.
 
 ---
 
@@ -126,28 +126,34 @@ At the top of the **OpenShell Policies** panel, the **Test CLI Command** box bot
 
 To keep the UI compact and scannable, rule rows avoid multi-line prose paragraphs and nested folds. Instead, hovering over any inner rule card or binary pill displays an **instant opaque floating tooltip (`#orcaTooltip`)** with the rule's rationale, binary path, and source policy file.
 
-### Tab 1: `Sandbox Egress` (`egress-tab.ts`)
+### Tab 1: `Egress` (`egress-tab.ts`)
 - **Manual L7 Rule Form (`+ Add Egress Rule`)**: Add an L7 HTTP rule (`host`, `port`, `method`, `path`, `binary`) to **Session** (hot-reloaded into the running sandbox via `openshell policy set`), **Project** (`<worktree>/.agents/policies/orca-project-egress.json`), or **Global** (`~/.agents/orca-openshell-policies/`).
 - **Foldable Host Cards**: One card per allowed destination (`host:port`), showing:
   - Access mode dot (`read-write`, `read-only`, or `l7-rules`) and rule count.
   - **Inner Binary Pills (`.cli-chip`)**: Compact chips for each permitted binary (`agy`, `claude`, `codex`, `curl`, `gh`, `git`, `*`). **Hovering a binary pill** shows the binary's container path (e.g. `/usr/local/bin/agy`), why it needs that host, and which policy file defined it.
   - **Inner L7 Method/Path Cards (`.rule-row`)**: Compact rows for each allowed HTTP `METHOD /path/**` rule (`allow` badge + method/path + binary pill) with hover tooltips and a `Remove` button for custom session/project/global rules.
 
-### Tab 2: `Sandbox System` (`system-tab.ts`)
-- **Active Sandboxes**: Lists OpenShell sandboxes (`Running` / `Paused`) bound to the active Orca tab:
+### Tab 2: `Filesystem` (`system-tab.ts`)
+- **Active Sandboxes (`Current Sandbox`)**: Lists OpenShell sandboxes (`Running` / `Paused`) bound to the active Orca tab:
   - **`Pause` / `Resume`**: Runs `openshell sandbox stop <name>` / `openshell sandbox start <name>` while preserving container state and policies.
   - **`Delete`**: Runs [`syncSandboxWorkspaceBeforeDelete`](src/sandbox/sandbox-control.ts) (`openshell sandbox download` to rescue any uncommitted file edits back to the host worktree) before deleting the container (`openshell sandbox delete <name>`).
-- **Sandbox Container Images & Missing Image Alarm**:
-  - Inspects `openshell-base:latest`, `openshell-antigravity:latest`, `openshell-claude:latest`, and `openshell-codex:latest` with disk size, creation timestamp, role, and `READY` / `MISSING` badges.
-  - If any image is missing or Docker is unavailable while Sandbox mode is enabled, triggers a top warning banner (with 1-click `Copy ./install.sh`), a tab alert badge (`!`), and a `Sandbox ⚠️` warning indicator in Orca's bottom status bar.
-- **OpenShell Doctor (`Run Doctor`)**: Verifies:
+- **Landlock Filesystem Mounts, Provider Credentials & Allowed Binaries**: Foldable cards with compact inner rows and hover tooltips for every read-only/read-write container path, proxy-injected credential placeholder, and executable path.
+
+### Tab 3: `Setup` (`setup-tab.ts`)
+- **Environment Readiness & `Re-check All` (`OpenShell Doctor`)**: Automatically checks live prerequisites on tab open:
   1. `openshell` CLI binary version & path.
   2. Active OpenShell Gateway reachability & running/paused sandbox counts.
-  3. Host bridge wrappers (`agent-box`, `claude-box`, `codex-box`, `agy-box`) in `~/.local/bin`.
+  3. Host bridge wrappers (`agent-box`, `claude-box`, `codex-box`, `agy-box`, `orca-delegation`) in `~/.local/bin`.
   4. Base L7 policy profiles (`claude.json`, `codex.json`, `antigravity.json`).
-  5. Required Docker sandbox images (`openshell-base`, `openshell-codex`, `openshell-claude`, `openshell-antigravity`).
+  5. Native CLI permission sync (`~/.claude/settings.json`, `~/.codex/rules/default.rules`, `~/.gemini/policies/managed-permissions.toml`) and subagent delegation broker state.
   6. Session registry health (automatically prunes stale sandbox entries).
-- **Landlock Filesystem Mounts, Provider Credentials & Allowed Binaries**: Foldable cards with compact inner rows and hover tooltips for every read-only/read-write container path, proxy-injected credential placeholder, and executable path.
+- **Sandbox Container Images & Missing Image Alarm**:
+  - Inspects `openshell-base:latest`, `openshell-antigravity:latest`, `openshell-claude:latest`, and `openshell-codex:latest` with disk size, creation timestamp, role, and `READY` / `MISSING` badges.
+  - If any image is missing or Docker is unavailable while Sandbox mode is enabled, triggers a top warning banner (with 1-click `Copy ./install.sh` and `Open Setup`), a tab alert badge (`!`), and a `Sandbox ⚠️` warning indicator in Orca's bottom status bar.
+
+### Tab 4: `Settings` (`settings-tab.ts`)
+- **Sandbox Preferences**: Global **Default Sandbox State** (`Off (Host Mode)` vs `On (Enforced)`), per-tab **Auto-Pause When Idle** timeout, and current worktree mode/inheritance status.
+- **Delegation & Configuration Paths**: Coordinator auto-grant and worker/depth limits, plus `~/.config/orca-openshell/sandbox-mode.json`, `<project>/.agents/policies`, and `~/.agents/orca-openshell-policies` paths.
 
 ---
 
@@ -196,7 +202,7 @@ Because `local.openshell-bridge` and `agent-box` interact with sandboxes exclusi
 2. **Ensure sandbox images are available on K3s nodes**:
    Make sure `openshell-antigravity:latest`, `openshell-claude:latest`, and `openshell-codex:latest` are imported into K3s `containerd` (or pushed to a registry reachable by your K3s cluster).
 3. **Verify in Orca**:
-   Open **OpenShell Policies → Sandbox System** and click **`Run Doctor`**. The **OpenShell Gateway** check will verify connectivity to the active K3s gateway, and new worktree sandboxes, SSH sessions, file syncs, and L7 policy updates will execute against the K3s cluster.
+   Open **OpenShell Policies → Setup** and click **`Re-check All`**. The **OpenShell Gateway** check will verify connectivity to the active K3s gateway, and new worktree sandboxes, SSH sessions, file syncs, and L7 policy updates will execute against the K3s cluster.
 
 ---
 
